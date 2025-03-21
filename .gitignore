@@ -1,0 +1,5 @@
+wandb/
+runs/
+david/
+wandb/*
+__pycache__/
