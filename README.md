@@ -9,13 +9,25 @@
 - simple_gan (folder): simple GAN solutions
 
 ## Related works
+### Theory
 - Generative Adversarial Nets: https://arxiv.org/pdf/1406.2661
 - Conditional Generative Adversarial Nets: https://arxiv.org/pdf/1411.1784
+- Wasserstein GAN: https://arxiv.org/pdf/1701.07875
+- Unsupervised Representation Learning With Deep Convolutional Generative Adversarial Networks: https://arxiv.org/pdf/1511.06434
+- Human friendly explanations from Interpretable Machine Learning by Cristoph Molnar: https://christophm.github.io/interpretable-ml-book/interpretability.html#explanation
+- Counterfactual explanations from Interpretable Machine Learning by Cristoph Molnar: https://christophm.github.io/interpretable-ml-book/counterfactual.html
 - CounterGAN: https://arxiv.org/pdf/2009.05199
+- Convolutional Networks for Images, Speech, and Time-Series: https://citeseerx.ist.psu.edu/document?repid=rep1&type=pdf&doi=e26cc4a1c717653f323715d751c8dea7461aa105
+- Convolutional Networks from the Dive into Deep Learning book: https://d2l.ai/chapter_convolutional-neural-networks/index.html
+### Implementations and datasets
 - Make_moons dataset: https://scikit-learn.org/stable/modules/generated/sklearn.datasets.make_moons.html
+- MNIST dataset: https://www.kaggle.com/datasets/hojjatk/mnist-dataset
 - GAN implementations for the make_moons dataset: https://github.com/dataflowr/notebooks/blob/master/Module10/10_GAN_double_moon.ipynb
+- Simple MLP GAN for MNIST dataset in PyTorch: https://github.com/vamsi3/simple-GAN/blob/master/src/PyTorch/gan-mnist-pytorch.py
+- DCGAN for generating MNIST digits in PyTorch: https://medium.com/@simple.schwarz/how-to-build-a-gan-for-generating-mnist-digits-in-pytorch-b9bf71269da8
+- Conditional WGAN using PyTorch: https://medium.com/@ngoodger_7766/conditional-gan-using-pytorch-7849a62fbcad
 
-(every URL accessed on 2025.03.22.)
+(every URL accessed on 2025.04.07.)
 
 
 ## How to run it
@@ -25,9 +37,9 @@ Build the Dockerfile (standing in the directory, where the abovementioned Docker
 docker build -t your_image_name .
 ```
 
-Start the container with the following command (standing in the directory, where the abovementioned files are):
+Start the container with the following command (standing in the directory, where the abovementioned files are). Make sure to mount the directory under which MNIST dataset is available when you try to run the MNIST codes.
 ```
-docker run -it --rm --gpus=all -v $(pwd):/home/yourUser your_image_name
+docker run -it --rm --gpus=all -v $(pwd):/home/yourUser -v /mnt/:/mnt/ your_image_name
 ```
 
 Inside the container, in bash, add execution rights to the file you want to run:
