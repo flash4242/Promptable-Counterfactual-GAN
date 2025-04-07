@@ -3,3 +3,4 @@ runs/
 david/
 wandb/*
 __pycache__/
+simple_gan/mnist/data/

@@ -149,7 +149,7 @@ plt.close()
 # Generate and save synthetic data
 def save_generated_data(generator, filename, config, scale_factor=1):
     z = torch.randn(scale_factor * config["n_samples"], config["z_dim"]).to(device)
-    fake_labels = torch.randint(0, config["label_dim"], (scale_factor * config["n_samples"],)).to(device)
+    fake_labels = torch.randint(0, config["label_dim"], (scale_factor * config["n_samples"],)).to(device) 
     fake_labels_onehot = one_hot_encode(fake_labels, config["label_dim"]).to(device)
 
     fake_samples = generator(z, fake_labels_onehot).cpu().detach().numpy()
