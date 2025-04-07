@@ -45,8 +45,6 @@ docker run -it --rm --gpus=all -v $(pwd):/home/yourUser -v /mnt/:/mnt/ your_imag
 Inside the container, in bash, add execution rights to the file you want to run:
 ```
 chmod +x make_moons_gan.py
-
-
 ```
 
 Then run the file:
