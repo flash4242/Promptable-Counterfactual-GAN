@@ -7,6 +7,7 @@
 - munkaterv.pdf: project description and schedule
 - conditional_gan (folder): conditional GAN solutions
 - simple_gan (folder): simple GAN solutions
+- dconv_gan (folder): deep convolutional GAN solution
 
 ## Related works
 ### Theory
