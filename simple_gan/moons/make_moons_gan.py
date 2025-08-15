@@ -19,17 +19,16 @@ config = {
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"Using GPU: {torch.cuda.is_available()}")
 
-def plot_data(ax, X, Y):
-    real_data = X[Y == 1]
-    fake_data = X[Y == 0]
 
-    ax.scatter(real_data[:, 0], real_data[:, 1], c='orange', edgecolors='k', label="Eredeti adatok")
-    ax.scatter(fake_data[:, 0], fake_data[:, 1], c='purple', edgecolors='k', label="Generált adatok")
+def plot_data(ax, X_real, Y_real, X_fake, Y_fake):
+    ax.scatter(X_real[:, 0], X_real[:, 1], c='orange', edgecolors='k', label="Original data", marker='o', alpha=0.7)
+    ax.scatter(X_fake[:, 0], X_fake[:, 1], c='purple', edgecolors='k', label="Generated data", marker='x', alpha=0.7)
 
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
-    ax.set_title("Generated Data")
+    #ax.set_title(title)
     ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.6)
 
 def build_generator(z_dim, hidden_dim):
     return nn.Sequential(
@@ -99,7 +98,8 @@ def save_loss_plot(loss_D_values, loss_G_values, filename="gan_losses.png"):
     plt.plot(range(len(loss_G_values)), loss_G_values, label="Generator Loss")
     plt.xlabel("Epochs")
     plt.ylabel("Loss")
-    plt.title("GAN Losses Over Epochs")
+    #plt.title("GAN Losses Over Epochs")
+    plt.ylim(0, 100)
     plt.legend()
     plt.grid(True)
     plt.savefig(filename)
@@ -107,16 +107,22 @@ def save_loss_plot(loss_D_values, loss_G_values, filename="gan_losses.png"):
 
 
 def save_generated_data(generator, filename, config, scale_factor=1):
+    # Generate fake samples
     z = torch.randn(scale_factor * config["n_samples"], config["z_dim"]).to(device)
     fake_samples = generator(z).cpu().detach().numpy()
+    
+    # Load or regenerate real data (if needed)
+    X_real, Y_real = make_moons(n_samples=config["n_samples"], noise=0.05, random_state=9)
+    
+    # Assign label 1 to real data, label 0 to fake for plotting (not strictly needed here, just consistent)
+    Y_fake = np.full((fake_samples.shape[0],), -1)  # Use -1 to clearly distinguish generated data
 
-    all_data = np.concatenate((X, fake_samples), axis=0)
-    Y_combined = np.concatenate((np.ones(config["n_samples"]), np.zeros(scale_factor * config["n_samples"])))
-
-    fig, ax = plt.subplots(facecolor='#4B6EA9')
-    plot_data(ax, all_data, Y_combined)
+    # Plot real and generated data separately
+    fig, ax = plt.subplots(figsize=(6, 6), facecolor='white')
+    plot_data(ax, X_real, Y_real, fake_samples, Y_fake)
     plt.savefig(filename)
     plt.close()
+
 
 # Moons adathalmaz
 X, _ = make_moons(n_samples=config["n_samples"], noise=0.05, random_state=9)
@@ -128,5 +134,5 @@ loss_D_values, loss_G_values = train_gan(X, generator, discriminator, config)
 
 # plotok mentése
 save_loss_plot(loss_D_values, loss_G_values)
-save_generated_data(generator, "generated_data_1.png", config)
-save_generated_data(generator, "generated_data_2.png", config, scale_factor=config["scale_factor"])
+save_generated_data(generator, "generated_data.png", config)
+#save_generated_data(generator, "generated_data_2.png", config, scale_factor=config["scale_factor"])

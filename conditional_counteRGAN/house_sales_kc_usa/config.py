@@ -1,0 +1,26 @@
+import os
+import torch
+
+results_dir = os.path.join(os.getcwd(), "results")
+os.makedirs(results_dir, exist_ok=True)
+
+config = {
+    'cuda': 'cuda' if torch.cuda.is_available() else 'cpu',
+    'data_path': 'kc_house_data.csv',
+    'batch_size': 256,
+    'input_dim': 17,
+    'lr_G': 1e-3,
+    'lr_D': 1e-3,
+    'lambda_cls': 2.0,
+    'lambda_reg': 0.5,
+    'lambda_div': 9,        # consider increasing lambda_div to help diversity, but too high may hurt class flip
+    'z_dim': 16,               # consider increasing z_dim to help diversity (increase to 8 or 16)
+    'hidden_dim': 32,
+    'output_dim': 1,
+    'epochs': 20,
+    'lr': 5e-4,
+    'eps': 1e-8,  # small value to avoid division by zero
+    'seed': 42,
+    'out_dir': results_dir,
+    'clf_model_path': 'clf_model.pth'
+}

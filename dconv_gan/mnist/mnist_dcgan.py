@@ -133,9 +133,13 @@ viz_noise = torch.randn(config['batch_size'], config['z_dim'], 1, 1, device=devi
 img_list = []
 G_losses, D_losses = [], []
 iters = 0
+epoch_G_losses = []
+epoch_D_losses = []
 
 print("Starting Training Loop...")
 for epoch in range(config['epochs']):
+    running_G_loss = 0.0
+    running_D_loss = 0.0
     for i, data in enumerate(dataloader):
         ############################
         # (1) Update D network
@@ -176,8 +180,9 @@ for epoch in range(config['epochs']):
                   f"Loss_D: {errD.item():.4f} Loss_G: {errG.item():.4f} "
                   f"D(x): {D_x:.4f} D(G(z)): {D_G_z1:.4f} / {D_G_z2:.4f}")
 
-        G_losses.append(errG.item())
-        D_losses.append(errD.item())
+
+        running_G_loss += errG.item()
+        running_D_loss += errD.item()
 
         if iters % 500 == 0 or (epoch == config['epochs'] - 1 and i == len(dataloader) - 1):
             with torch.no_grad():
@@ -186,17 +191,26 @@ for epoch in range(config['epochs']):
             img_list.append(img)
 
         iters += 1
+    
+    avg_G_loss = running_G_loss / len(dataloader)
+    avg_D_loss = running_D_loss / len(dataloader)
+    epoch_G_losses.append(avg_G_loss)
+    epoch_D_losses.append(avg_D_loss)
 
 # Save loss plot
-plt.figure(figsize=(10,5))
-plt.title("Generator and Discriminator Loss During Training")
-plt.plot(G_losses, label="G")
-plt.plot(D_losses, label="D")
-plt.xlabel("Iterations")
+
+plt.figure(figsize=(8, 5))
+plt.plot(range(config['epochs']), epoch_D_losses, label="Discriminator Loss")
+plt.plot(range(config['epochs']), epoch_G_losses, label="Generator Loss")
+plt.xlabel("Epochs")
 plt.ylabel("Loss")
+#plt.title("Generator and Discriminator Loss During Training")
 plt.legend()
+plt.grid(True)
 plt.tight_layout()
 plt.savefig(os.path.join(config['out_dir'], 'loss_plot.png'))
+plt.close()
+
 
 # Save real vs fake images
 real_batch = next(iter(dataloader))

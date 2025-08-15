@@ -22,12 +22,12 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"Using GPU: {torch.cuda.is_available()}")
 
 def plot_data(ax, X_real, Y_real, X_fake, Y_fake, title="Generated vs Real Data"):
-    ax.scatter(X_real[:, 0], X_real[:, 1], c='orange', edgecolors='k', label="Eredeti adatok", marker='o', alpha=0.7)
-    ax.scatter(X_fake[:, 0], X_fake[:, 1], c='purple', edgecolors='k', label="Generált adatok", marker='x', alpha=0.7)
+    ax.scatter(X_real[:, 0], X_real[:, 1], c='orange', edgecolors='k', label="Original data", marker='o', alpha=0.7)
+    ax.scatter(X_fake[:, 0], X_fake[:, 1], c='purple', edgecolors='k', label="Generated data", marker='x', alpha=0.7)
 
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
-    ax.set_title(title)
+    #ax.set_title(title)
     ax.legend()
     ax.grid(True, linestyle="--", alpha=0.6)
 
@@ -95,7 +95,7 @@ for epoch in range(config["epochs"]):
 
         # Generate fake samples
         z = torch.randn(config["batch_size"], config["z_dim"]).to(device)
-        fake_labels = torch.randint(0, config["label_dim"], (config["batch_size"],)).to(device)
+        fake_labels = torch.randint(0, 1, (config["batch_size"],)).to(device)
         fake_labels_onehot = one_hot_encode(fake_labels, config["label_dim"]).to(device)
 
         fake_samples = generator(z, fake_labels_onehot)
@@ -136,11 +136,11 @@ for epoch in range(config["epochs"]):
 
 # Plot loss curves
 plt.figure(figsize=(8, 5))
-plt.plot(loss_D_values, label="Discriminator Loss", color="red")
-plt.plot(loss_G_values, label="Generator Loss", color="blue")
+plt.plot(loss_D_values, label="Discriminator Loss")
+plt.plot(loss_G_values, label="Generator Loss")
 plt.xlabel("Epochs")
 plt.ylabel("Loss")
-plt.title("Conditional GAN Losses")
+#plt.title("Conditional GAN Losses")
 plt.legend()
 plt.grid(True)
 plt.savefig("cgan_loss.png")
@@ -162,6 +162,6 @@ def save_generated_data(generator, filename, config, scale_factor=1):
 
 # 🔹 Save generated datasets
 save_generated_data(generator, "cgan_generated_1.png", config)
-save_generated_data(generator, "cgan_generated_2.png", config, scale_factor=config["scale_factor"])
+#save_generated_data(generator, "cgan_generated_2.png", config, scale_factor=config["scale_factor"])
 
 print("Training completed and generated images saved!")

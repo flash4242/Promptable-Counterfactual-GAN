@@ -36,6 +36,21 @@ class Hyperparameter:
 
 hp = Hyperparameter()
 
+def save_loss_plot(loss_D_values, loss_G_values, filename="gan_losses.png"):
+    plt.figure()
+    plt.plot(range(len(loss_D_values)), loss_D_values, label="Discriminator Loss")
+    plt.plot(range(len(loss_G_values)), loss_G_values, label="Generator Loss")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    # plt.title("GAN Losses Over Epochs")
+    plt.ylim(0, max(max(loss_D_values), max(loss_G_values)) * 1.1)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(filename)
+    plt.close()
+
+
 class Generator(nn.Module):
     def __init__(self):
         super(Generator, self).__init__()
@@ -115,6 +130,8 @@ grad_tensor = torch.ones((hp.batchsize, 1), device="cuda")
 
 start_time = time.time()
 for epoch in range(hp.num_epochs):
+    epoch_g_losses, epoch_d_losses = [], []
+
     for batch_idx, data in enumerate(dataloader, 0):
         real_images, real_class_labels = data[0].to("cuda"), all_labels[data[1]].to("cuda")
 
@@ -154,49 +171,45 @@ for epoch in range(hp.num_epochs):
             generator_optimizer.step()
 
         # Output training stats
-        if batch_idx % 100 == 0:
-            elapsed_time = time.time() - start_time
-            print(f"[{epoch:>2}/{hp.num_epochs}][{iters:>7}][{elapsed_time:8.2f}s]\t"
-                  f"d_loss/g_loss: {critic_loss.item():4.2}/{generator_loss.item():4.2}\t")
+        # if batch_idx % 100 == 0:
+        #     elapsed_time = time.time() - start_time
+        #     print(f"[{epoch:>2}/{hp.num_epochs}][{iters:>7}][{elapsed_time:8.2f}s]\t"
+        #           f"d_loss/g_loss: {critic_loss.item():4.2}/{generator_loss.item():4.2}\t")
 
         # Save Losses for plotting later
-        generator_losses.append(generator_loss.item())
-        critic_losses.append(critic_loss.item())
-
-        # Check how the generator is doing by saving G's output on fixed_noise
-        if (iters % 500 == 0) or ((epoch == hp.num_epochs - 1) and (batch_idx == len(dataloader) - 1)):
-            with torch.no_grad(): fake_images = generator(fixed_noise, fixed_class_labels).cpu()
-            img_list.append(vutils.make_grid(fake_images, padding=2, normalize=True))
+        epoch_d_losses.append(critic_loss.item())
+        epoch_g_losses.append(generator_loss.item())
+        # # Check how the generator is doing by saving G's output on fixed_noise
+        # if (iters % 500 == 0) or ((epoch == hp.num_epochs - 1) and (batch_idx == len(dataloader) - 1)):
+        #     with torch.no_grad(): fake_images = generator(fixed_noise, fixed_class_labels).cpu()
+        #     img_list.append(vutils.make_grid(fake_images, padding=2, normalize=True))
 
         iters += 1
+    avg_g_loss = sum(epoch_g_losses) / len(epoch_g_losses)
+    avg_d_loss = sum(epoch_d_losses) / len(epoch_d_losses)
+    generator_losses.append(avg_g_loss)
+    critic_losses.append(avg_d_loss)
+    print(f"[{epoch+1:>2}/{hp.num_epochs}]  Avg D Loss: {avg_d_loss:.4f}  Avg G Loss: {avg_g_loss:.4f}")
+
 
 
 # Saving loss plot
-plt.figure()
-plt.title("Generator and Critic Loss During Training")
-plt.plot(generator_losses, label="Generator (G)")
-plt.plot(critic_losses, label="Critic (D)")
-plt.xlabel("Iterations")
-plt.ylabel("Loss")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.savefig("loss_plot.png") 
-plt.close()
+save_loss_plot(critic_losses, generator_losses, "loss_plot.png")
 
-# Saving animation
-import imageio
-import numpy as np
-import os
 
-# Mappa és fájl neve
-gif_path = os.path.join(os.getcwd(), "training_animation.gif")
-# Tensor -> NumPy array konvertálása imageio számára
-frames = []
-for img in img_list:
-    np_img = img.permute(1, 2, 0).numpy()  # CHW -> HWC
-    np_img = (np_img * 255).astype(np.uint8)  # Normalizálás vissza [0, 255] közé
-    frames.append(np_img)
+# # Saving animation
+# import imageio
+# import numpy as np
+# import os
+
+# # Mappa és fájl neve
+# gif_path = os.path.join(os.getcwd(), "training_animation.gif")
+# # Tensor -> NumPy array konvertálása imageio számára
+# frames = []
+# for img in img_list:
+#     np_img = img.permute(1, 2, 0).numpy()  # CHW -> HWC
+#     np_img = (np_img * 255).astype(np.uint8)  # Normalizálás vissza [0, 255] közé
+#     frames.append(np_img)
 
 # GIF mentés
-imageio.mimsave(gif_path, frames, duration=1.0)  # 1 kép/mp
+#imageio.mimsave(gif_path, frames, duration=1.0)  # 1 kép/mp

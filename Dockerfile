@@ -15,7 +15,8 @@ RUN apt-get update -y && \
     zip \
     unzip \
     build-essential \
-    graphviz
+    graphviz \
+    tree
 
 RUN apt-get clean
 RUN rm -rf /var/lib/apt/lists/*
