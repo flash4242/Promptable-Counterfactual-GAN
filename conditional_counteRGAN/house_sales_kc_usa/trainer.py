@@ -25,7 +25,7 @@ def train_countergan(config, X_train, y_train, clf_model):
     loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True, drop_last=True)
 
     # Models
-    G = ResidualGenerator(config['input_dim'], config['z_dim'], config['hidden_dim'], num_classes).to(device)
+    G = ResidualGenerator(config['input_dim'], config['hidden_dim'], num_classes).to(device)
     D = Discriminator(config['input_dim'], config['hidden_dim'], num_classes).to(device)
 
     opt_G = optim.Adam(G.parameters(), lr=config['lr_G'])
@@ -40,7 +40,6 @@ def train_countergan(config, X_train, y_train, clf_model):
     for epoch in range(config['epochs']):
         epoch_d_losses = []
         epoch_g_losses = []
-        epoch_div_losses = []
 
         for x_batch, y_batch in loader:
             x_batch = x_batch.to(device)
@@ -52,25 +51,18 @@ def train_countergan(config, X_train, y_train, clf_model):
             target_y = torch.where(target_y == y_batch, (target_y + 1) % num_classes, target_y)
             target_onehot = F.one_hot(target_y, num_classes).float()
 
-            # two noise draws for diversity loss / mode-seeking
-            z1 = torch.randn(bs, config['z_dim'], device=device)
-            z2 = torch.randn(bs, config['z_dim'], device=device)
-
-            # compute two deltas (residuals)
-            delta1 = G(x_batch, target_onehot, z1)  # used for D and for main G loss
-            delta2 = G(x_batch, target_onehot, z2)  # used only for diversity loss
-            x_cf1 = x_batch + delta1
+            # compute residual
+            residual = G(x_batch, target_onehot)  # used for D and for main G loss
+            x_cf = x_batch + residual
 
             # -------------------------
             # Train Discriminator
             # -------------------------
-            D_real, D_real_cls = D(x_batch)
-            D_fake, _ = D(x_cf1.detach())
+            D_real = D(x_batch)
+            D_fake = D(x_cf.detach())
 
-            # WGAN-style adversarial loss for D (critic)
-            adv_loss_D = -D_real.mean() + D_fake.mean()
-            cls_loss_D = F.cross_entropy(D_real_cls, y_batch)
-            D_loss = adv_loss_D + config['lambda_cls'] * cls_loss_D
+            # original adversarial discriminator loss
+            D_loss = -D_real.mean() + D_fake.mean()
 
             opt_D.zero_grad()
             D_loss.backward()
@@ -79,28 +71,23 @@ def train_countergan(config, X_train, y_train, clf_model):
             # -------------------------
             # Train Generator
             # -------------------------
-            D_fake_forG, _ = D(x_cf1)
+
+            D_fake_forG = D(x_cf)
+
+            # original adversarial loss for generator
             G_adv_loss = -D_fake_forG.mean()
 
-            # classifier (external) encourages x_cf to be classified as target_y
-            clf_preds = clf_model(x_cf1)
-            G_cls_loss = F.cross_entropy(clf_preds, target_y)
+            # classifier (external) encourages x_cf to be classified as target_y - marked as V_CF in the paper
+            clf_preds = clf_model(x_cf)  # logits
+            G_cls_loss = F.cross_entropy(clf_preds, target_y) # original classifier loss: Ex∼pdata log (1 − Ct(x + G(x))). x_cf= x + G(x)
 
-            # regularizer: L1 norm of the delta (proximity)
-            G_reg_loss = torch.mean(torch.norm(delta1, p=1, dim=1))
-
-            # diversity (mode-seeking) loss: encourage delta1 != delta2 for different z
-            # normalize by latent difference to avoid scaling issues
-            numerator = torch.mean(torch.abs(delta1 - delta2))
-            denom = torch.mean(torch.abs(z1 - z2)) + config['eps']  # add small value to avoid division by zero
-            div_loss = - (numerator / denom)  # negative because we reward maximizing diversity
-            # if lambda_div == 0 this term doesn't affect anything
+            # regularizer: L1 norm of the residual (proximity)
+            G_reg_loss = torch.mean(torch.norm(residual, p=1, dim=1))
 
             G_loss = (
                 G_adv_loss +
-                config['lambda_cls'] * G_cls_loss +
-                config['lambda_reg'] * G_reg_loss +
-                config['lambda_div'] * div_loss
+                G_cls_loss * config['lambda_cls'] +
+                G_reg_loss * config['lambda_reg']
             )
 
             opt_G.zero_grad()
@@ -109,22 +96,19 @@ def train_countergan(config, X_train, y_train, clf_model):
 
             epoch_d_losses.append(D_loss.item())
             epoch_g_losses.append(G_loss.item())
-            epoch_div_losses.append(div_loss.item())
 
         # epoch log
         d_losses.append(np.mean(epoch_d_losses))
         g_losses.append(np.mean(epoch_g_losses))
-        div_losses.append(np.mean(epoch_div_losses))
 
         if (epoch + 1) % 1 == 0 or epoch == 0:
             print(f"[{epoch+1}/{config['epochs']}] "
-                  f"D: {d_losses[-1]:.4f}, G: {g_losses[-1]:.4f}, div: {div_losses[-1]:.4f}")
+                  f"D: {d_losses[-1]:.4f}, G: {g_losses[-1]:.4f}")
 
     # Save loss curves
     os.makedirs(config['out_dir'], exist_ok=True)
     plt.plot(d_losses, label='Discriminator Loss')
     plt.plot(g_losses, label='Generator Loss')
-    plt.plot(div_losses, label='Diversity Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()

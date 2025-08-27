@@ -9,7 +9,6 @@ from torch.utils.data import TensorDataset, DataLoader
 
 def compute_metrics_per_target(generator, classifier, X, y, config, max_vis=500):
     device = config['cuda']
-    z_dim = config['z_dim']
     batch_size = config['batch_size']
 
     X_t = torch.tensor(X, dtype=torch.float32)
@@ -27,8 +26,8 @@ def compute_metrics_per_target(generator, classifier, X, y, config, max_vis=500)
     with torch.no_grad():
         for target in range(num_classes):
             flips_per_batch = [] # class flip rate
-            prox_per_batch = [] # proximity to original
-            div_per_batch = [] # diversity of generated samples
+            pred_gain_per_batch = [] # prediction gain
+            act_per_batch = [] # actionability
 
             for x_batch, y_batch in loader:
                 x_batch = x_batch.to(device)
@@ -45,36 +44,45 @@ def compute_metrics_per_target(generator, classifier, X, y, config, max_vis=500)
                 target_vec = torch.full((bs,), target, device=device, dtype=torch.long)
                 target_onehot = F.one_hot(target_vec, num_classes).float()
 
-                # two noise draws for diversity measurement
-                z1 = torch.randn(bs, z_dim, device=device)
-                z2 = torch.randn(bs, z_dim, device=device)
+                residual = generator(x, target_onehot)
+                cf = x + residual
 
-                delta1 = generator(x, target_onehot, z1)
-                delta2 = generator(x, target_onehot, z2)
-                cf1 = x + delta1
-                cf2 = x + delta2
+                cf_classifier_preds = classifier(cf)
+                cf_preds = cf_classifier_preds.argmax(dim=1)
+                flip_rate = (cf_preds == target_vec).float().mean().item()
 
-                preds = classifier(cf1).argmax(dim=1)
-                flip_rate = (preds == target_vec).float().mean().item()
-                proximity = torch.mean(torch.abs(delta1)).item()
-                diversity = torch.mean(torch.abs(cf1 - cf2)).item()
+                # raw logits
+                logits_orig = classifier(x)
+                logits_cf = cf_classifier_preds
+
+                # softmax probabilities (batch_size, num_classes)
+                probs_orig = F.softmax(logits_orig, dim=1)
+                probs_cf = F.softmax(logits_cf, dim=1)
+
+                # pick probability for the *target class t*
+                p_orig = probs_orig[torch.arange(bs), target_vec]
+                p_cf = probs_cf[torch.arange(bs), target_vec]
+
+                pred_gain = (p_cf - p_orig).mean().item()
+                actionability = torch.mean(torch.abs(residual)).item()
 
                 flips_per_batch.append(flip_rate)
-                prox_per_batch.append(proximity)
-                div_per_batch.append(diversity)
+                pred_gain_per_batch.append(pred_gain)
+                act_per_batch.append(actionability)
 
                 # collect a few for visualization
                 if len(originals_vis) < max_vis:
                     originals_vis.append(x.cpu())
-                    cfs_vis.append(cf1.cpu())
+                    cfs_vis.append(cf.cpu())
 
             # aggregate target
             results.append({
                 'target_class': target,
                 'class_flip': float(np.mean(flips_per_batch)) if flips_per_batch else np.nan,
-                'avg_proximity': float(np.mean(prox_per_batch)) if prox_per_batch else np.nan,
-                'diversity': float(np.mean(div_per_batch)) if div_per_batch else np.nan
+                'prediction_gain': float(np.mean(pred_gain_per_batch)) if pred_gain_per_batch else np.nan,
+                'avg_actionability': float(np.mean(act_per_batch)) if act_per_batch else np.nan
             })
+
 
     # concatenate visuals (limited)
     if originals_vis:

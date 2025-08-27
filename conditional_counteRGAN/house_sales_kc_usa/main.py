@@ -2,7 +2,7 @@
 import torch
 from config import config
 from data_utils import load_and_preprocess
-from nn_classifier import NNClassifier
+from models.nn_classifier import NNClassifier
 from trainer import train_countergan
 from eval_utils import evaluate_pipeline
 
