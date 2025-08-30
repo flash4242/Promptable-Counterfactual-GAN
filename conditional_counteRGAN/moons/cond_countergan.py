@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from sklearn.datasets import make_moons
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
 import numpy as np
 import argparse
@@ -45,7 +45,7 @@ X = np.vstack([X_moons, X_rect])
 y = np.concatenate([y_moons, y_rect])
 
 # Skálázás és torch konverzió
-scaler = StandardScaler()
+scaler = MinMaxScaler()
 X = scaler.fit_transform(X)
 X = torch.tensor(X, dtype=torch.float32)
 y = torch.tensor(y, dtype=torch.long).unsqueeze(1)  # többosztályhoz long típus

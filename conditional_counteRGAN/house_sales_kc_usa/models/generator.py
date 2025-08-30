@@ -24,8 +24,8 @@ class ResidualGenerator(nn.Module):
         self.res3 = ResidualBlock(hidden_dim)
         self.fc_out = nn.Linear(hidden_dim, input_dim)
 
-    def forward(self, x, y_onehot):
-        x_input = torch.cat([x, y_onehot], dim=1)
+    def forward(self, x, target):
+        x_input = torch.cat([x, target], dim=1)
         h = self.fc_in(x_input)
         h = self.res1(h)
         h = self.res2(h)

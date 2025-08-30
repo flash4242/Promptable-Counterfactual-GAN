@@ -13,7 +13,6 @@ config = {
     'lr_D': 1e-3,
     'lambda_cls': 2.0,
     'lambda_reg': 0.5,
-    'lambda_div': 9,        # consider increasing lambda_div to help diversity, but too high may hurt class flip
     'hidden_dim': 32,
     'output_dim': 1,
     'epochs': 20,
