@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
+from config import Config
 
 class ResidualGenerator(nn.Module):
-    def __init__(self, img_shape=(1,28,28), num_classes=10):
+    def __init__(self, img_shape=(1,28,28), num_classes=Config.num_classes):
         super().__init__()
         C, H, W = img_shape
         self.embed = nn.Embedding(num_classes, H*W)
-        self.g_hidden = 64 * 16
+        self.g_hidden = 128
         self.img_channel = 1
 
         self.main = nn.Sequential(

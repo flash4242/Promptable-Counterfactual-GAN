@@ -40,19 +40,16 @@ def evaluate_classifier(classifier, dataloader, device, save_dir=None, prefix="c
 
 def evaluate_counterfactuals(generator, classifier, x, y_true, y_target, device):
     """
-    x: batch of images (B,1,28,28)
-    y_true: true labels (B,)
-    y_target: target labels for CFs (B,)
+    x: batch of images (B,1,28,28) in normalized [-1,1]
     """
     classifier.eval()
     generator.eval()
     num_classes = classifier(torch.zeros(1,1,28,28).to(device)).shape[1]
 
-    y_target_onehot = F.one_hot(y_target, num_classes=num_classes).float().to(device)
-
     with torch.no_grad():
         residual = generator(x.to(device), y_target.to(device))
-        x_cf = x.to(device) + residual
+        # clamp to training range
+        x_cf = torch.clamp(x.to(device) + residual, -1.0, 1.0)
         logits = classifier(x_cf)
         probs = F.softmax(logits, dim=1)
 
@@ -63,53 +60,67 @@ def evaluate_counterfactuals(generator, classifier, x, y_true, y_target, device)
 
     actionability = (torch.abs(x_cf - x.to(device)).mean().item())
 
+    # return denormalized x_cf for visualization: [-1,1] -> [0,1]
+    x_cf_vis = ((x_cf + 1.0) / 2.0).detach().cpu()
+
     return {
         "class_flip_rate": cfr,
         "prediction_gain": pred_gain,
         "actionability": actionability,
-    }, x_cf.cpu()
-
+    }, x_cf_vis
 
 def visualize_counterfactual_grid(generator, classifier, dataset, device,
                                   save_path="cf_grid.png"):
     """
-    For each digit 0-9: pick one sample, generate CFs for all other digits.
-    Output: 10x10 grid (rows=source, cols=target).
+    Visualize a grid of counterfactuals for classes the classifier supports.
+    Works when dataset & models are filtered to a subset of MNIST digits (e.g. 3 classes).
     """
     classifier.eval()
     generator.eval()
-    num_classes = 10
 
-    # pick one sample per class
+    # infer number of classes from classifier output
+    with torch.no_grad():
+        num_classes = classifier(torch.zeros(1, 1, 28, 28).to(device)).shape[1]
+
+    # pick one sample per class from dataset (dataset may already be filtered & remapped to 0..num_classes-1)
     samples = []
-    for digit in range(num_classes):
-        for img, label in dataset:
-            if label == digit:
-                samples.append((img.unsqueeze(0), label))
-                break
+    found = set()
+    for img, label in dataset:
+        # label can be tensor or int
+        lab = int(label) if isinstance(label, (torch.Tensor,)) else int(label)
+        if 0 <= lab < num_classes and lab not in found:
+            samples.append((img.unsqueeze(0), lab))
+            found.add(lab)
+        if len(found) >= num_classes:
+            break
 
-    fig, axes = plt.subplots(num_classes, num_classes, figsize=(15, 15))
-    for src_digit in range(num_classes):
-        x_src, _ = samples[src_digit]
+    # if we didn't find enough samples, raise informative error
+    if len(samples) < num_classes:
+        raise ValueError(f"Could not find one sample for each of the {num_classes} classes in the provided dataset. Found samples for classes: {sorted(list(found))}")
+
+    # create grid
+    fig, axes = plt.subplots(num_classes, num_classes, figsize=(3*num_classes, 3*num_classes))
+    for src_idx in range(num_classes):
+        x_src, _ = samples[src_idx]
         x_src = x_src.to(device)
-        for tgt_digit in range(num_classes):
-            ax = axes[src_digit, tgt_digit]
+        for tgt_idx in range(num_classes):
+            ax = axes[src_idx, tgt_idx] if num_classes > 1 else axes
             ax.axis("off")
 
-            if src_digit == tgt_digit:
-                # original image
-                ax.imshow(x_src.squeeze().cpu().numpy(), cmap="gray")
+            if src_idx == tgt_idx:
+                # original image: denormalize for display
+                img_disp = ((x_src.squeeze().cpu().numpy() + 1.0) / 2.0)
+                ax.imshow(img_disp, cmap="gray", vmin=0.0, vmax=1.0)
             else:
-                tgt = torch.tensor([tgt_digit], device=device)
-                tgt_onehot = F.one_hot(tgt, num_classes=num_classes).float()
-
+                tgt = torch.tensor([tgt_idx], device=device)
                 with torch.no_grad():
                     residual = generator(x_src, tgt)
-                    x_cf = x_src + residual
-
-                ax.imshow(x_cf.squeeze().cpu().numpy(), cmap="gray")
+                    x_cf = torch.clamp(x_src + residual, -1.0, 1.0)
+                # move to cpu BEFORE numpy conversion
+                img_disp = ((x_cf.squeeze().cpu().numpy() + 1.0) / 2.0)
+                ax.imshow(img_disp, cmap="gray", vmin=0.0, vmax=1.0)
 
     plt.tight_layout()
-    plt.savefig(save_path)
+    plt.savefig(save_path, dpi=150)
     plt.close()
     print(f"Saved CF grid: {save_path}")
