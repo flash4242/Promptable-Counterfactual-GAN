@@ -69,57 +69,96 @@ def evaluate_counterfactuals(generator, classifier, x, y_true, y_target, device)
         "actionability": actionability,
     }, x_cf_vis
 
+import torch
+import matplotlib.pyplot as plt
+import numpy as np
+
 def visualize_counterfactual_grid(generator, classifier, dataset, device,
-                                  save_path="cf_grid.png"):
+                                  class_map=None, save_path="cf_grid.png",
+                                  pick_best_source=False):
     """
-    Visualize a grid of counterfactuals for classes the classifier supports.
-    Works when dataset & models are filtered to a subset of MNIST digits (e.g. 3 classes).
+    Visualize N x N counterfactual grid.
+    - Rows = source class
+    - Columns = target class
+    - Each cell labeled with source label + predicted label + confidence
+    - Red border if prediction != target
     """
-    classifier.eval()
+    class_map = {0: '2', 1: '5', 2: '8'} if class_map is None else class_map
     generator.eval()
+    classifier.eval()
 
-    # infer number of classes from classifier output
+    # Infer number of classes dynamically
     with torch.no_grad():
-        num_classes = classifier(torch.zeros(1, 1, 28, 28).to(device)).shape[1]
+        num_classes = classifier(torch.zeros(1,1,28,28).to(device)).shape[1]
 
-    # pick one sample per class from dataset (dataset may already be filtered & remapped to 0..num_classes-1)
-    samples = []
-    found = set()
-    for img, label in dataset:
-        # label can be tensor or int
-        lab = int(label) if isinstance(label, (torch.Tensor,)) else int(label)
-        if 0 <= lab < num_classes and lab not in found:
-            samples.append((img.unsqueeze(0), lab))
-            found.add(lab)
-        if len(found) >= num_classes:
-            break
-
-    # if we didn't find enough samples, raise informative error
-    if len(samples) < num_classes:
-        raise ValueError(f"Could not find one sample for each of the {num_classes} classes in the provided dataset. Found samples for classes: {sorted(list(found))}")
-
-    # create grid
-    fig, axes = plt.subplots(num_classes, num_classes, figsize=(3*num_classes, 3*num_classes))
-    for src_idx in range(num_classes):
-        x_src, _ = samples[src_idx]
-        x_src = x_src.to(device)
-        for tgt_idx in range(num_classes):
-            ax = axes[src_idx, tgt_idx] if num_classes > 1 else axes
-            ax.axis("off")
-
-            if src_idx == tgt_idx:
-                # original image: denormalize for display
-                img_disp = ((x_src.squeeze().cpu().numpy() + 1.0) / 2.0)
-                ax.imshow(img_disp, cmap="gray", vmin=0.0, vmax=1.0)
+    # Pick one sample per class
+    samples = [None] * num_classes
+    best_conf = [-1.0] * num_classes
+    with torch.no_grad():
+        for x, y in dataset:
+            idx = int(y)
+            if pick_best_source:
+                # choose sample with highest classifier confidence for its true class
+                conf = torch.softmax(classifier(x.unsqueeze(0).to(device)), dim=1)[0, idx].item()
+                if conf > best_conf[idx]:
+                    samples[idx], best_conf[idx] = x.unsqueeze(0), conf
             else:
-                tgt = torch.tensor([tgt_idx], device=device)
+                if samples[idx] is None:
+                    samples[idx] = x.unsqueeze(0)
+            if all(s is not None for s in samples):
+                break
+
+    fig, axes = plt.subplots(num_classes, num_classes, figsize=(3*num_classes, 3*num_classes))
+
+    def show_image(ax, img, text, border_color=None):
+        """Helper to display image with optional border + annotation text"""
+        ax.imshow(img, cmap="gray", vmin=0, vmax=1)
+        ax.axis("off")
+        if border_color:
+            for spine in ax.spines.values():
+                spine.set_edgecolor(border_color)
+                spine.set_linewidth(2.5)
+        ax.text(1, 1, text, color="white", fontsize=7,
+                ha="left", va="top", bbox=dict(facecolor='black', alpha=0.6, pad=1))
+
+    for r, x_src in enumerate(samples):
+        x_src = x_src.to(device)
+
+        for c in range(num_classes):
+            ax = axes[r, c]
+
+            if r == c:
+                # Original sample
+                img_disp = ((x_src.squeeze().cpu().numpy() + 1.0) / 2.0)
+                src_label = class_map[r] if class_map else r
+                show_image(ax, img_disp, f"src={src_label}", border_color="red")
+            else:
+                # Generate counterfactual
+                tgt = torch.tensor([c], device=device)
                 with torch.no_grad():
                     residual = generator(x_src, tgt)
-                    x_cf = torch.clamp(x_src + residual, -1.0, 1.0)
-                # move to cpu BEFORE numpy conversion
-                img_disp = ((x_cf.squeeze().cpu().numpy() + 1.0) / 2.0)
-                ax.imshow(img_disp, cmap="gray", vmin=0.0, vmax=1.0)
+                    x_cf = torch.clamp(x_src + residual, -1, 1)
+                    logits = classifier(x_cf)
+                    probs = torch.softmax(logits, dim=1)
+                    pred_idx = int(probs.argmax(dim=1))
+                    pred_conf = probs[0, pred_idx].item()
 
+                img_disp = ((x_cf.squeeze().cpu().numpy() + 1.0) / 2.0)
+                src_label = class_map[r] if class_map else r
+                pred_digit = class_map[pred_idx] if class_map else pred_idx
+                color = "lime" if pred_idx == c else "red"
+                show_image(ax, img_disp,
+                           f"src={src_label}\npred={pred_digit}\nconf={pred_conf:.2f}",
+                           border_color=color)
+
+            if r == 0:
+                col_name = class_map[c] if class_map else c
+                ax.set_title(f"Tgt: {col_name}", fontsize=12)
+            if c == 0:
+                row_name = class_map[r] if class_map else r
+                ax.set_ylabel(f"Src: {row_name}", fontsize=12, rotation=90)
+
+    plt.suptitle("Counterfactual Grid", fontsize=14)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
