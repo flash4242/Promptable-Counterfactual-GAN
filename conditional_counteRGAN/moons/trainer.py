@@ -51,6 +51,7 @@ def train_countergan(config, X_train, y_train, clf_model):
     clf_model.eval()
 
     d_losses, g_losses = [], []
+    batch_inspected = 0
 
     for epoch in range(config['epochs']):
         epoch_d_losses, epoch_g_losses = [], []
@@ -64,6 +65,12 @@ def train_countergan(config, X_train, y_train, clf_model):
 
             residual = G(x_batch, target_onehot)
             x_cf = x_batch + residual
+            # if batch_inspected < 1:
+            #     print(f"Example originals (first 5):\n{x_batch[:5].detach().cpu().numpy()}")
+            #     print(f"Example residuals (first 5):\n{residual[:5].detach().cpu().numpy()}")
+            #     print(f"Example counterfactuals (first 5):\n{x_cf[:5].detach().cpu().numpy()}")
+            #     batch_inspected += 1
+
 
             # D update
             D_real = D(x_batch)
