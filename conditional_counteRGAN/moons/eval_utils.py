@@ -25,8 +25,13 @@ def evaluate_classifier(clf, X_test, y_test, config):
     df.to_csv(save_path)
     print(f"Classifier accuracy: {acc:.4f}, confusion matrix saved to {save_path}")
 
+# eval_utils.py (modified parts)
 
-def compute_metrics_per_target(generator, classifier, X, y, config):
+def compute_metrics_per_target(generator, classifier, X, y, config, mask=None):
+    """
+    mask: None (means generator will be called without mask - fallback),
+          or a (input_dim,) or (bs, input_dim) binary float tensor or numpy array.
+    """
     device = config['cuda']
     batch_size = config['batch_size']
 
@@ -50,32 +55,45 @@ def compute_metrics_per_target(generator, classifier, X, y, config):
                 x_batch = x_batch.to(device)
                 y_batch = y_batch.to(device)
 
-                mask = (y_batch != target)
-                if mask.sum() == 0:
+                mask_samples = (y_batch != target)
+                if mask_samples.sum() == 0:
                     continue
-                x = x_batch[mask]
+                x = x_batch[mask_samples]
                 if x.size(0) == 0:
                     continue
 
                 bs = x.size(0)
                 target_vec = torch.full((bs,), target, device=device, dtype=torch.long)
-                target_onehot = F.one_hot(target_vec, num_classes).float()
+                target_onehot = F.one_hot(target_vec, num_classes).float().to(device)
 
-                residual = generator(x, target_onehot)
+                # prepare mask: if mask is None, pass None; if mask is array, expand to bs
+                if mask is None:
+                    mask_tensor = None
+                else:
+                    # mask can be numpy 1D or torch 1D or shape (input_dim,)
+                    m = torch.tensor(mask, dtype=torch.float32, device=device)
+                    if m.dim() == 1:
+                        mask_tensor = m.unsqueeze(0).expand(bs, -1)
+                    else:
+                        mask_tensor = m[:bs].float()  # if provided per-sample
+                residual = generator(x, target_onehot, mask=mask_tensor)
                 cf = x + residual
 
                 cf_logits = classifier(cf)
                 cf_preds = cf_logits.argmax(dim=1)
                 flip_rate = (cf_preds == target_vec).float().mean().item()
 
-                # softmax probabilities
                 probs_orig = F.softmax(classifier(x), dim=1)
                 probs_cf = F.softmax(cf_logits, dim=1)
                 p_orig = probs_orig[torch.arange(bs), target_vec]
                 p_cf = probs_cf[torch.arange(bs), target_vec]
 
                 pred_gain = (p_cf - p_orig).mean().item()
-                actionability = torch.mean(torch.abs(residual)).item()
+                # actionability measured only on masked residual (if mask available)
+                if mask_tensor is not None:
+                    actionability = torch.mean(torch.abs(residual * mask_tensor)).item()
+                else:
+                    actionability = torch.mean(torch.abs(residual)).item()
 
                 flips_per_batch.append(flip_rate)
                 pred_gain_per_batch.append(pred_gain)
@@ -88,11 +106,11 @@ def compute_metrics_per_target(generator, classifier, X, y, config):
                 "avg_actionability": float(np.mean(act_per_batch)) if act_per_batch else np.nan
             })
 
-
     return pd.DataFrame(results)
 
+
 def plot_decision_boundaries_and_cfs(generator, classifier, X, y, config,
-                                     n_cf_samples=20, save_prefix="decision_boundaries_cfs"):
+                                     mask=None, n_cf_samples=20, save_prefix="decision_boundaries_cfs"):
     device = config['cuda']
     num_classes = len(np.unique(y))
 
@@ -108,7 +126,10 @@ def plot_decision_boundaries_and_cfs(generator, classifier, X, y, config,
         Z = classifier(grid_t).argmax(1).cpu().numpy()
     Z = Z.reshape(xx.shape)
 
-    # Define grouped plots
+    # folder ready
+    out_dir = config['out_dir']
+    os.makedirs(out_dir, exist_ok=True)
+
     groups = [
         {"pairs": [(0, 1), (0, 2)], "title": "Counterfactuals from Class 0"},
         {"pairs": [(1, 0), (1, 2)], "title": "Counterfactuals from Class 1"},
@@ -118,34 +139,39 @@ def plot_decision_boundaries_and_cfs(generator, classifier, X, y, config,
 
     for g_idx, group in enumerate(groups):
         plt.figure(figsize=(8, 6))
-        # decision boundaries
         plt.contourf(xx, yy, Z, alpha=0.3, cmap="coolwarm")
-
-        # original data
         plt.scatter(X[:, 0], X[:, 1], c=y, cmap="coolwarm", edgecolor="k", s=20, alpha=0.6)
 
         for (src, tgt) in group["pairs"]:
             pair_idx = [(0, 1), (1, 0), (1, 2), (2, 1), (2, 0), (0, 2)].index((src, tgt))
             color = colors[pair_idx]
 
-            mask = (y == src)
-            if mask.sum() == 0:
+            mask_idx = (y == src)
+            if mask_idx.sum() == 0:
                 continue
-            idx = np.random.choice(np.where(mask)[0], size=min(n_cf_samples, mask.sum()), replace=False)
+            idx = np.random.choice(np.where(mask_idx)[0], size=min(n_cf_samples, mask_idx.sum()), replace=False)
 
             x_src = torch.tensor(X[idx], dtype=torch.float32).to(device)
             tgt_vec = torch.full((x_src.size(0),), tgt, device=device, dtype=torch.long)
-            tgt_onehot = F.one_hot(tgt_vec, num_classes).float()
+            tgt_onehot = F.one_hot(tgt_vec, num_classes).float().to(device)
 
+            # prepare mask for these samples
+            if mask is None:
+                mask_tensor = None
+            else:
+                m = torch.tensor(mask, dtype=torch.float32, device=device)
+                if m.dim() == 1:
+                    mask_tensor = m.unsqueeze(0).expand(x_src.size(0), -1)
+                else:
+                    mask_tensor = m[:x_src.size(0)]
             with torch.no_grad():
-                residual = generator(x_src, tgt_onehot)
+                residual = generator(x_src, tgt_onehot, mask=mask_tensor)
                 x_cf = x_src + residual
 
             x_src_np = x_src.cpu().numpy()
             x_cf_np = x_cf.cpu().numpy()
 
-            plt.scatter(x_cf_np[:, 0], x_cf_np[:, 1], c=color, marker=None,
-                        label=f"{src}->{tgt}", alpha=0.9)
+            plt.scatter(x_cf_np[:, 0], x_cf_np[:, 1], c=color, label=f"{src}->{tgt}", alpha=0.9)
 
             # arrows
             for xs, xc in zip(x_src_np, x_cf_np):
@@ -156,8 +182,7 @@ def plot_decision_boundaries_and_cfs(generator, classifier, X, y, config,
         plt.ylabel("y")
         plt.title(group["title"])
         plt.legend()
-        os.makedirs(config["out_dir"], exist_ok=True)
-        save_path = os.path.join(config["out_dir"], f"{save_prefix}_group{g_idx+1}.png")
+        save_path = os.path.join(out_dir, f"{save_prefix}_group{g_idx+1}.png")
         plt.savefig(save_path)
         plt.close()
         print(f"Saved plot: {save_path}")
@@ -168,9 +193,41 @@ def save_metrics(df, save_path):
     print(f"Saved metrics to {save_path}")
 
 def evaluate_pipeline(generator, classifier, X_test, y_test, config):
-    out = config['out_dir']
+    base_out = config['out_dir']
+
+    # Define masks (as numpy 1D arrays) - input_dim assumed 2
+    masks = {
+        "both": np.array([1, 1], dtype=np.float32),
+        "none": np.array([0, 0], dtype=np.float32),
+        "x_only": np.array([1, 0], dtype=np.float32),
+        "y_only": np.array([0, 1], dtype=np.float32)
+    }
+
+    # first global classifier metrics
     evaluate_classifier(classifier, X_test, y_test, config)
-    metrics_df = compute_metrics_per_target(generator, classifier, X_test, y_test, config)
-    plot_decision_boundaries_and_cfs(generator, classifier, X_test, y_test, config)
-    save_metrics(metrics_df, os.path.join(out, "metrics.csv"))
-    return metrics_df
+
+    all_metrics = {}
+    for name, mask in masks.items():
+        print(f"Evaluating mask: {name}")
+        out_dir = os.path.join(base_out, f"mask_{name}")
+        cfg = dict(config)  # shallow copy
+        cfg['out_dir'] = out_dir
+        os.makedirs(out_dir, exist_ok=True)
+
+        metrics_df = compute_metrics_per_target(generator, classifier, X_test, y_test, cfg, mask=mask)
+        save_metrics(metrics_df, os.path.join(out_dir, "metrics.csv"))
+
+        plot_decision_boundaries_and_cfs(generator, classifier, X_test, y_test, cfg,
+                                         mask=mask, n_cf_samples=30,
+                                         save_prefix=f"decision_boundaries_cfs_{name}")
+        all_metrics[name] = metrics_df
+
+    # Optionally concatenate and save a summary table with masks as columns
+    summary_rows = []
+    for name, df in all_metrics.items():
+        df2 = df.copy()
+        df2['mask'] = name
+        summary_rows.append(df2)
+    summary_df = pd.concat(summary_rows, ignore_index=True)
+    save_metrics(summary_df, os.path.join(base_out, "metrics_all_masks.csv"))
+    return summary_df

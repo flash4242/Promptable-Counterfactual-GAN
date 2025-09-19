@@ -14,7 +14,9 @@ class ResidualGenerator(nn.Module):
             nn.Linear(hidden_dim//2, input_dim)
         )
 
-    def forward(self, x, target):
-        x_cat = torch.cat([x, target], dim=1)
-        residual = self.net(x_cat)
-        return residual
+    def forward(self, x, target_onehot, mask=None):
+        h = torch.cat([x, target_onehot], dim=1)
+        raw_residual = self.net(h)
+        masked_residual = raw_residual if mask is None else raw_residual * mask
+        return masked_residual
+

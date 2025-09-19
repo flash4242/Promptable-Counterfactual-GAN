@@ -3,15 +3,9 @@ from config import config
 from data_utils import load_and_preprocess
 from trainer import train_classifier, train_countergan
 from eval_utils import evaluate_pipeline
-
-#!/usr/bin/env python3
 import os
 import torch
-from config import config
-from data_utils import load_and_preprocess
 from models.nn_classifier import NNClassifier
-from trainer import train_countergan
-from eval_utils import evaluate_pipeline
 import torch.optim as optim
 import torch.nn as nn
 

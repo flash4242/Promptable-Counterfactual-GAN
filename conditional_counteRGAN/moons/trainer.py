@@ -58,19 +58,19 @@ def train_countergan(config, X_train, y_train, clf_model):
         for x_batch, y_batch in loader:
             x_batch, y_batch = x_batch.to(device), y_batch.to(device)
             bs = x_batch.size(0)
+            num_features = x_batch.size(1)
 
+            # target class (ensure different from original)
             target_y = torch.randint(0, num_classes, (bs,), device=device)
             target_y = torch.where(target_y == y_batch, (target_y + 1) % num_classes, target_y)
-            target_onehot = F.one_hot(target_y, num_classes).float()
+            target_onehot = F.one_hot(target_y, num_classes).float().to(device)
 
-            residual = G(x_batch, target_onehot)
+            # sample binary mask correctly: 0 or 1 per feature
+            # Use uniform p=0.5 or make configurable in config
+            modifiable_features = torch.randint(0, 2, (bs, num_features), device=device).float()
+
+            residual = G(x_batch, target_onehot, mask=modifiable_features)
             x_cf = x_batch + residual
-            # if batch_inspected < 1:
-            #     print(f"Example originals (first 5):\n{x_batch[:5].detach().cpu().numpy()}")
-            #     print(f"Example residuals (first 5):\n{residual[:5].detach().cpu().numpy()}")
-            #     print(f"Example counterfactuals (first 5):\n{x_cf[:5].detach().cpu().numpy()}")
-            #     batch_inspected += 1
-
 
             # D update
             D_real = D(x_batch)
@@ -83,6 +83,8 @@ def train_countergan(config, X_train, y_train, clf_model):
             G_adv_loss = -D_fake_forG.mean()
             clf_preds = clf_model(x_cf)
             G_cls_loss = F.cross_entropy(clf_preds, target_y)
+
+            # leak_penalty = torch.mean(torch.norm(raw_residual * (1-mask), p=1, dim=1)) # if want to penalize changes on unmodifiable features
             G_reg_loss = torch.mean(torch.norm(residual, p=1, dim=1))
 
             G_loss = (
