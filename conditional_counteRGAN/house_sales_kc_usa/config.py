@@ -3,6 +3,8 @@ import torch
 
 results_dir = os.path.join(os.getcwd(), "results")
 os.makedirs(results_dir, exist_ok=True)
+mask_dir = os.path.join(results_dir, "mask_analysis")
+os.makedirs(mask_dir, exist_ok=True)
 
 config = {
     'cuda': 'cuda' if torch.cuda.is_available() else 'cpu',
@@ -20,5 +22,6 @@ config = {
     'eps': 1e-8,  # small value to avoid division by zero
     'seed': 42,
     'out_dir': results_dir,
+    'out_dir_mask': mask_dir,
     'clf_model_path': 'clf_model.pth'
 }

@@ -45,36 +45,30 @@ def train_countergan(config, X_train, y_train, clf_model):
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
             bs = x_batch.size(0)
+            num_features = x_batch.size(1)
 
             # sample random target classes different from original
             target_y = torch.randint(0, num_classes, (bs,), device=device)
             target_y = torch.where(target_y == y_batch, (target_y + 1) % num_classes, target_y)
             target_onehot = F.one_hot(target_y, num_classes).float()
 
-            # compute residual
-            residual = G(x_batch, target_onehot)  # used for D and for main G loss
+            # sample binary mask correctly: 0 or 1 per feature
+            # Use uniform p=0.5 or make configurable in config
+            modifiable_features = torch.randint(0, 2, (bs, num_features), device=device).float()
+            residual = G(x_batch, target_onehot, mask=modifiable_features)  # used for D and for main G loss
             x_cf = x_batch + residual
 
-            # -------------------------
-            # Train Discriminator
-            # -------------------------
+            # D update
             D_real = D(x_batch)
             D_fake = D(x_cf.detach())
-
-            # original adversarial discriminator loss
             D_loss = -D_real.mean() + D_fake.mean()
 
             opt_D.zero_grad()
             D_loss.backward()
             opt_D.step()
 
-            # -------------------------
-            # Train Generator
-            # -------------------------
-
+            # G update
             D_fake_forG = D(x_cf)
-
-            # original adversarial loss for generator
             G_adv_loss = -D_fake_forG.mean()
 
             # classifier (external) encourages x_cf to be classified as target_y - marked as V_CF in the paper

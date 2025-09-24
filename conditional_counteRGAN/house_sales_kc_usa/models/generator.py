@@ -24,11 +24,12 @@ class ResidualGenerator(nn.Module):
         self.res3 = ResidualBlock(hidden_dim)
         self.fc_out = nn.Linear(hidden_dim, input_dim)
 
-    def forward(self, x, target):
+    def forward(self, x, target, mask=None):
         x_input = torch.cat([x, target], dim=1)
         h = self.fc_in(x_input)
         h = self.res1(h)
         h = self.res2(h)
         h = self.res3(h)
-        residual = self.fc_out(h)
-        return residual
+        raw_residual = self.fc_out(h)
+        masked_residual = raw_residual if mask is None else raw_residual * mask
+        return masked_residual

@@ -19,6 +19,13 @@ def load_and_preprocess(data_path, seed):
     print(df['price_class'].value_counts().sort_index())
 
     X = df.drop(columns=['price', 'price_class']).values
+
+    # inspect the features and their values
+    print("\nFeature idx-es, names and 5 sample values:")
+    feature_names = df.drop(columns=['price', 'price_class']).columns
+    for i, name in enumerate(feature_names):
+        print(f"{i}: {name}, sample values: {df[name].unique()[:5]}")
+
     y = df['price_class'].values  # Use quartile class labels
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=seed)

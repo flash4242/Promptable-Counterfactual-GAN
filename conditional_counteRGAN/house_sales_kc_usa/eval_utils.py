@@ -6,6 +6,7 @@ import numpy as np
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 from torch.utils.data import TensorDataset, DataLoader
+from eval_utils_mask_analysis import evaluate_pipeline_masks
 
 def compute_metrics_per_target(generator, classifier, X, y, config, max_vis=500):
     device = config['cuda']
@@ -124,5 +125,5 @@ def evaluate_pipeline(generator, classifier, X_test, y_test, config):
     out = config['out_dir']
     metrics_df, origins_vis, cfs_vis = compute_metrics_per_target(generator, classifier, X_test, y_test, config)
     save_metrics(metrics_df, os.path.join(out, "countergan_metrics.csv"))
-    plot_tsne(origins_vis, cfs_vis, os.path.join(out, "tsne_orig_vs_cf.png"))
+    evaluate_pipeline_masks(generator, classifier, X_test, y_test, config, mode='single', compute_minimal_mask_size=True)
     return metrics_df
