@@ -8,22 +8,19 @@ class Discriminator(nn.Module):
         C,H,W = img_shape
         self.cond_embed = nn.Embedding(num_classes, H*W)
         self.img_channel = 2
-        self.d_hidden = 64
+        self.d_hidden = 16
 
         self.main = nn.Sequential(
             nn.Conv2d(self.img_channel, self.d_hidden, 3, 2, 1, bias=False),
             nn.LeakyReLU(0.2, inplace=True),
 
             nn.Conv2d(self.d_hidden, self.d_hidden * 2, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(self.d_hidden * 2),
             nn.LeakyReLU(0.2, inplace=True),
 
             nn.Conv2d(self.d_hidden * 2, self.d_hidden * 4, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(self.d_hidden * 4),
             nn.LeakyReLU(0.2, inplace=True),
 
             nn.Conv2d(self.d_hidden * 4, self.d_hidden * 8, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(self.d_hidden * 8),
             nn.LeakyReLU(0.2, inplace=True),
 
             nn.AdaptiveAvgPool2d(1)

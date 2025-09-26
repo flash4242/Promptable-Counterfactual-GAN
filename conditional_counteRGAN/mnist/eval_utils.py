@@ -72,33 +72,35 @@ def evaluate_counterfactuals(generator, classifier, x, y_true, y_target, device)
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
-
 def visualize_counterfactual_grid(generator, classifier, dataset, device,
                                   class_map=None, save_path="cf_grid.png",
                                   pick_best_source=False):
     """
-    Visualize N x N counterfactual grid.
+    Visualize counterfactuals for all classes.
     - Rows = source class
     - Columns = target class
-    - Each cell labeled with source label + predicted label + confidence
-    - Red border if prediction != target
+    - Each cell shows:
+        Original (col 0) or Counterfactual (col >0)
+        Target class, Predicted class, Prediction confidence
     """
-    class_map = {0: '2', 1: '5', 2: '8'} if class_map is None else class_map
     generator.eval()
     classifier.eval()
 
-    # Infer number of classes dynamically
+    # infer num_classes dynamically
     with torch.no_grad():
-        num_classes = classifier(torch.zeros(1,1,28,28).to(device)).shape[1]
+        num_classes = classifier(torch.zeros(1, 1, 28, 28).to(device)).shape[1]
 
-    # Pick one sample per class
+    # default mapping: numbers themselves
+    if class_map is None:
+        class_map = {i: str(i) for i in range(num_classes)}
+
+    # pick one source sample per class
     samples = [None] * num_classes
     best_conf = [-1.0] * num_classes
     with torch.no_grad():
         for x, y in dataset:
             idx = int(y)
             if pick_best_source:
-                # choose sample with highest classifier confidence for its true class
                 conf = torch.softmax(classifier(x.unsqueeze(0).to(device)), dim=1)[0, idx].item()
                 if conf > best_conf[idx]:
                     samples[idx], best_conf[idx] = x.unsqueeze(0), conf
@@ -108,18 +110,21 @@ def visualize_counterfactual_grid(generator, classifier, dataset, device,
             if all(s is not None for s in samples):
                 break
 
-    fig, axes = plt.subplots(num_classes, num_classes, figsize=(3*num_classes, 3*num_classes))
+    fig, axes = plt.subplots(num_classes, num_classes, figsize=(2.5*num_classes, 2.5*num_classes))
 
-    def show_image(ax, img, text, border_color=None):
-        """Helper to display image with optional border + annotation text"""
+    def show_image(ax, img, tgt, pred=None, conf=None, border_color=None):
+        """Helper to display image with annotation."""
         ax.imshow(img, cmap="gray", vmin=0, vmax=1)
         ax.axis("off")
         if border_color:
             for spine in ax.spines.values():
                 spine.set_edgecolor(border_color)
                 spine.set_linewidth(2.5)
-        ax.text(1, 1, text, color="white", fontsize=7,
-                ha="left", va="top", bbox=dict(facecolor='black', alpha=0.6, pad=1))
+        text = f"Tgt={tgt}"
+        if pred is not None:
+            text += f"\nPred={pred}\nConf={conf:.2f}"
+        ax.text(0.5, -0.05, text, color="black", fontsize=7,
+                ha="center", va="top", transform=ax.transAxes)
 
     for r, x_src in enumerate(samples):
         x_src = x_src.to(device)
@@ -128,12 +133,13 @@ def visualize_counterfactual_grid(generator, classifier, dataset, device,
             ax = axes[r, c]
 
             if r == c:
-                # Original sample
+                # Original image
                 img_disp = ((x_src.squeeze().cpu().numpy() + 1.0) / 2.0)
-                src_label = class_map[r] if class_map else r
-                show_image(ax, img_disp, f"src={src_label}", border_color="red")
+                src_label = class_map[r]
+                show_image(ax, img_disp, tgt=src_label,
+                           pred=src_label, conf=1.0, border_color="blue")
             else:
-                # Generate counterfactual
+                # Counterfactual to target class
                 tgt = torch.tensor([c], device=device)
                 with torch.no_grad():
                     residual = generator(x_src, tgt)
@@ -144,22 +150,20 @@ def visualize_counterfactual_grid(generator, classifier, dataset, device,
                     pred_conf = probs[0, pred_idx].item()
 
                 img_disp = ((x_cf.squeeze().cpu().numpy() + 1.0) / 2.0)
-                src_label = class_map[r] if class_map else r
-                pred_digit = class_map[pred_idx] if class_map else pred_idx
-                color = "lime" if pred_idx == c else "red"
-                show_image(ax, img_disp,
-                           f"src={src_label}\npred={pred_digit}\nconf={pred_conf:.2f}",
-                           border_color=color)
+                tgt_label = class_map[c]
+                pred_label = class_map[pred_idx]
+                color = "green" if pred_idx == c else "red"
+                show_image(ax, img_disp, tgt=tgt_label,
+                           pred=pred_label, conf=pred_conf, border_color=color)
 
             if r == 0:
-                col_name = class_map[c] if class_map else c
-                ax.set_title(f"Tgt: {col_name}", fontsize=12)
+                ax.set_title(f"Tgt={class_map[c]}", fontsize=10)
             if c == 0:
-                row_name = class_map[r] if class_map else r
-                ax.set_ylabel(f"Src: {row_name}", fontsize=12, rotation=90)
+                ax.set_ylabel(f"Src={class_map[r]}", fontsize=10, rotation=90)
 
     plt.suptitle("Counterfactual Grid", fontsize=14)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
     print(f"Saved CF grid: {save_path}")
+

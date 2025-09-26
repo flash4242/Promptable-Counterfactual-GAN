@@ -10,7 +10,9 @@ class Generator(nn.Module):
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(64, 1, kernel_size=3, padding=1)
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 1, kernel_size=3, padding=1)
         )
 
     def forward(self, x, c):
