@@ -1,31 +1,81 @@
 import torch
 import torch.nn as nn
-from config import Config
+
+
+class _ResBlock(nn.Module):
+    """Very small residual block with BN and LeakyReLU.
+    The residual path is scaled before adding to the identity to stabilize early training.
+    """
+    def __init__(self, channels, activation=nn.LeakyReLU(0.2, inplace=True)):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.act = activation
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
+
+    def forward(self, x):
+        #out=self.act(self.bn2(self.conv2(self.act(self.bn1(self.conv1(x))))))
+        out = self.act(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        # scale the residual to keep updates conservative at first
+        return x + 0.1 * out
+
 
 class ResidualGenerator(nn.Module):
-    def __init__(self, img_shape=(1,28,28), num_classes=Config.num_classes):
+    """Residual generator for counterfactuals.
+    - Returns `residual` (do `x_cf = torch.clamp(x + residual, -1, 1)` in training/eval).
+    - Default is conservative: base_ch=32, n_resblocks=2, residual_scaling=0.1.
+    - No tanh on the output (keeps gradients stable). Clamping happens externally.
+    """
+
+    def __init__(self, img_shape=(1, 28, 28), num_classes=10, base_ch=64, n_resblocks=6,
+                 residual_scaling=0.1):
         super().__init__()
         C, H, W = img_shape
-        self.embed = nn.Embedding(num_classes, H*W)
-        self.g_hidden = 32
-        self.img_channel = 1
+        self.embed = nn.Embedding(num_classes, H * W)
 
-        self.main = nn.Sequential(
-            nn.Conv2d(C+1, self.g_hidden, 3, 1, 1),
-            nn.ReLU(inplace=True),
+        # entry
+        self.conv_in = nn.Conv2d(C + 1, base_ch, kernel_size=3, padding=1)
+        self.act = nn.LeakyReLU(0.2, inplace=True)
 
-            nn.Conv2d(self.g_hidden, self.g_hidden, 3, 1, 1),
-            nn.ReLU(inplace=True),
+        # small stack of residual blocks (cheap but effective)
+        blocks = []
+        for _ in range(n_resblocks):
+            blocks.append(_ResBlock(base_ch, activation=self.act))
+        self.resblocks = nn.Sequential(*blocks)
 
-            nn.Conv2d(self.g_hidden, self.g_hidden, 3, 1, 1),
-            nn.ReLU(inplace=True),
+        # a small bottleneck conv and the final output conv
+        self.conv_mid = nn.Conv2d(base_ch, base_ch, kernel_size=3, padding=1)
+        self.conv_out = nn.Conv2d(base_ch, 1, kernel_size=3, padding=1)
 
-            nn.Conv2d(self.g_hidden, 1, 3, 1, 1)
-        )
+        # global scaling (keeps outputs conservative; adjust during experiments)
+        self.residual_scaling = residual_scaling
+
+        self._init_weights()
+
+
+    def _init_weights(self):
+        # Kaiming init for convs, normal small init for embedding
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, a=0.2)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0.0, std=0.01)
 
     def forward(self, x, target):
         B, C, H, W = x.shape
-        y_map = self.embed(target).view(B,1,H,W)
+        y_map = self.embed(target).view(B, 1, H, W).to(x.dtype).to(x.device)
         inp = torch.cat([x, y_map], dim=1)
-        residual = self.main(inp)
+
+        h = self.act(self.conv_in(inp))
+        h = self.resblocks(h)
+        h = self.act(self.conv_mid(h))
+
+        residual = self.conv_out(h) * self.residual_scaling
         return residual

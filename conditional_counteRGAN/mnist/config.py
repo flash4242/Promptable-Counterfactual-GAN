@@ -8,10 +8,10 @@ class Config:
     num_epochs_clf = 10
     cls_lr = 1e-3
     d_lr = 1e-5
-    g_lr = 2e-5
+    g_lr = 5e-5
     lambda_adv = 1.0
     lambda_cls = 1.0
-    lambda_reg = 0.03
+    lambda_reg = 2.5
 
     latent_dim = 100
     img_shape = (1, 28, 28)

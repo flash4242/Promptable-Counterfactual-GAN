@@ -101,7 +101,7 @@ def train_countergan(generator, discriminator, classifier, train_loader, cfg, de
             if batch_idx % 100 == 0:
                 print(f"[Epoch {epoch+1}/{cfg.num_epochs_gan}] batch {batch_idx} :: "
                       f"D(real)={d_real_p:.3f}, D(fake)={d_fake_p:.3f}, g_adv={g_adv.item():.4f}, "
-                      f"g_cls={g_cls.item():.4f}, reg={reg_l1.item():.6f}")
+                      f"g_cls={g_cls.item():.4f}, reg={reg_l1.item():.6f}, residual_mean={residual.abs().mean().item():.4f}")
 
         g_losses.append(g_epoch / num_batches)
         d_losses.append(d_epoch / num_batches)
