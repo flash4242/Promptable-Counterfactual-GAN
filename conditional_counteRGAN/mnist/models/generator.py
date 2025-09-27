@@ -20,16 +20,7 @@ class ResidualGenerator(nn.Module):
             nn.Conv2d(self.g_hidden, self.g_hidden, 3, 1, 1),
             nn.ReLU(inplace=True),
 
-            nn.Conv2d(self.g_hidden, self.g_hidden, 3, 1, 1),
-            nn.ReLU(inplace=True),
-
-            nn.Conv2d(self.g_hidden, self.g_hidden, 3, 1, 1),
-            nn.ReLU(inplace=True),
-
-            nn.Conv2d(self.g_hidden, self.g_hidden, 3, 1, 1),
-            nn.ReLU(inplace=True),
-
-            nn.Conv2d(self.g_hidden, self.img_channel, 3, 1, 1),
+            nn.Conv2d(self.g_hidden, 1, 3, 1, 1)
         )
 
     def forward(self, x, target):

@@ -20,14 +20,11 @@ class Discriminator(nn.Module):
             nn.Conv2d(self.d_hidden * 2, self.d_hidden * 4, 3, 2, 1, bias=False),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.Conv2d(self.d_hidden * 4, self.d_hidden * 8, 3, 2, 1, bias=False),
-            nn.LeakyReLU(0.2, inplace=True),
-
             nn.AdaptiveAvgPool2d(1)
         )
 
         self.flatten = nn.Flatten()
-        self.adv_head = nn.Linear(self.d_hidden*8, 1)
+        self.adv_head = nn.Linear(self.d_hidden*4, 1)
         # self.cls_head = nn.Linear(self.d_hidden*8, num_classes)
 
     def forward(self, x, cond_idx):

@@ -55,32 +55,18 @@ def train_countergan(generator, discriminator, classifier, train_loader, cfg, de
         sum_g_cls = 0.0
         num_batches = 0
 
-        # instance-noise schedule (linear decay)
-        # max_noise = 0.15
-        # noise_std = max_noise * (1.0 - (epoch / (cfg.num_epochs_gan - 1 + 1e-8)))
-
         for batch_idx, (x, y) in enumerate(train_loader):
             x, y = x.to(device), y.to(device)
             bs = x.size(0)
             num_batches += 1
 
-            target_y = torch.randint(0, cfg.num_classes, (1,), device=device).expand(bs)
+            target_y = torch.randint(0, cfg.num_classes, (bs,), device=device)
             
             residual = generator(x, target_y)
             x_cf = torch.clamp(x + residual, -1.0, 1.0)
 
             # Discriminator update
             opt_d.zero_grad()
-            # # add small instance noise to stabilize D (decays over epochs)
-            # if noise_std > 0:
-            #     x_noisy = x + torch.randn_like(x) * noise_std
-            #     x_cf_noisy = x_cf.detach() + torch.randn_like(x_cf) * noise_std
-            # else:
-            #     x_noisy = x
-            #     x_cf_noisy = x_cf.detach()
-
-            # # label smoothing for real
-            # real_label_value = 0.9
             d_real_logits = discriminator(x, y)
             d_fake_logits = discriminator(x_cf.detach(), target_y)
 

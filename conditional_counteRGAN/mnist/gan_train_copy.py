@@ -17,9 +17,9 @@ from modules.discriminator import Discriminator
 params = {
     'batch_size': 128,
     'epochs_clf': 10,
-    'epochs_gan': 30,
-    'lr_G': 1e-4,
-    'lr_D': 5e-5,
+    'epochs_gan': 50,
+    'lr_G': 5e-5,
+    'lr_D': 1e-5,
     'lr_C': 1e-3,
     'lambda_cls': 2.0,
     'lambda_reg': 0.01,
@@ -118,6 +118,7 @@ for epoch in range(params['epochs_gan']):
 
         random_class = torch.randint(0, 10, (1,), device=params['device']).item()
         target = torch.full_like(y_true, random_class)
+
 
         # Discriminator
         x_cf, _ = G(x, target)
