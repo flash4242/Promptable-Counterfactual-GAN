@@ -9,6 +9,10 @@ from torch.utils.data import TensorDataset, DataLoader
 from models.generator import ResidualGenerator
 from models.discriminator import Discriminator
 
+def grad_norm(params):
+    return sum(p.grad.norm().item() for p in params if p.grad is not None)
+
+
 def train_countergan(config, X_train, y_train, clf_model):
     device = config['cuda']
     seed = config.get('seed', 42)
@@ -41,7 +45,7 @@ def train_countergan(config, X_train, y_train, clf_model):
         epoch_d_losses = []
         epoch_g_losses = []
 
-        for x_batch, y_batch in loader:
+        for batch_idx, (x_batch, y_batch) in enumerate(loader):
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
             bs = x_batch.size(0)
@@ -78,15 +82,32 @@ def train_countergan(config, X_train, y_train, clf_model):
             # regularizer: L1 norm of the residual (proximity)
             G_reg_loss = torch.mean(torch.norm(residual, p=1, dim=1))
 
+            # penalty for trying to modify immutable features
+            G_mask_penalty = torch.mean(torch.abs(residual * (1 - modifiable_features)))
+
             G_loss = (
                 G_adv_loss +
                 G_cls_loss * config['lambda_cls'] +
-                G_reg_loss * config['lambda_reg']
+                G_reg_loss * config['lambda_reg'] +
+                G_mask_penalty * config['lambda_mask']
             )
 
             opt_G.zero_grad()
             G_loss.backward()
             opt_G.step()
+
+            # ---- Logging / diagnostics ----
+            with torch.no_grad():
+                d_real_p = torch.sigmoid(D_real).mean().item()
+                d_fake_p = torch.sigmoid(D_fake_forG).mean().item()
+
+
+            if batch_idx % 100 == 0:
+                print(f"[Epoch {epoch+1}/{config['epochs']}] batch {batch_idx} :: "
+                    f"D(real)={d_real_p:.3f}, D(fake)={d_fake_p:.3f}, "
+                    f"g_adv={G_adv_loss.item():.4f}, g_cls={G_cls_loss.item():.4f}, "
+                    f"reg={G_reg_loss.item():.6f}, mask_pen={G_mask_penalty.item():.5f}, "
+                    f"res_mean={residual.abs().mean().item():.4f}, ")
 
             epoch_d_losses.append(D_loss.item())
             epoch_g_losses.append(G_loss.item())
@@ -95,14 +116,18 @@ def train_countergan(config, X_train, y_train, clf_model):
         d_losses.append(np.mean(epoch_d_losses))
         g_losses.append(np.mean(epoch_g_losses))
 
+        g_grad_norm = grad_norm(G.parameters())
+        d_grad_norm = grad_norm(D.parameters())
+
         if (epoch + 1) % 1 == 0 or epoch == 0:
             print(f"[{epoch+1}/{config['epochs']}] "
-                  f"D: {d_losses[-1]:.4f}, G: {g_losses[-1]:.4f}")
+                  f"D: {d_losses[-1]:.4f}, G: {g_losses[-1]:.4f}"
+                  f" | G_grad: {g_grad_norm:.4f}, D_grad: {d_grad_norm:.4f}")
 
     # Save loss curves
     os.makedirs(config['out_dir'], exist_ok=True)
-    plt.plot(d_losses, label='Discriminator Loss')
     plt.plot(g_losses, label='Generator Loss')
+    plt.plot(d_losses, label='Discriminator Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
