@@ -25,7 +25,6 @@ def evaluate_classifier(clf, X_test, y_test, config):
     df.to_csv(save_path)
     print(f"Classifier accuracy: {acc:.4f}, confusion matrix saved to {save_path}")
 
-# eval_utils.py (modified parts)
 
 def compute_metrics_per_target(generator, classifier, X, y, config, mask=None):
     """
@@ -76,8 +75,8 @@ def compute_metrics_per_target(generator, classifier, X, y, config, mask=None):
                         mask_tensor = m.unsqueeze(0).expand(bs, -1)
                     else:
                         mask_tensor = m[:bs].float()  # if provided per-sample
-                residual = generator(x, target_onehot, mask=mask_tensor)
-                cf = x + residual
+                _, masked_residual = generator(x, target_onehot, mask=mask_tensor)
+                cf = x + masked_residual
 
                 cf_logits = classifier(cf)
                 cf_preds = cf_logits.argmax(dim=1)
@@ -89,11 +88,9 @@ def compute_metrics_per_target(generator, classifier, X, y, config, mask=None):
                 p_cf = probs_cf[torch.arange(bs), target_vec]
 
                 pred_gain = (p_cf - p_orig).mean().item()
-                # actionability measured only on masked residual (if mask available)
-                if mask_tensor is not None:
-                    actionability = torch.mean(torch.abs(residual * mask_tensor)).item()
-                else:
-                    actionability = torch.mean(torch.abs(residual)).item()
+
+                # actionability measured only on masked residual
+                actionability = torch.mean(torch.abs(masked_residual)).item()
 
                 flips_per_batch.append(flip_rate)
                 pred_gain_per_batch.append(pred_gain)
@@ -165,8 +162,8 @@ def plot_decision_boundaries_and_cfs(generator, classifier, X, y, config,
                 else:
                     mask_tensor = m[:x_src.size(0)]
             with torch.no_grad():
-                residual = generator(x_src, tgt_onehot, mask=mask_tensor)
-                x_cf = x_src + residual
+                _, masked_residual = generator(x_src, tgt_onehot, mask=mask_tensor)
+                x_cf = x_src + masked_residual
 
             x_src_np = x_src.cpu().numpy()
             x_cf_np = x_cf.cpu().numpy()
