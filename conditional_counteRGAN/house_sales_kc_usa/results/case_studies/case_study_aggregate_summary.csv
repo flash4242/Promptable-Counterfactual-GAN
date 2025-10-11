@@ -1,0 +1,2 @@
+n_samples_used,class_flip_rate,mean_prediction_gain,median_prediction_gain,mean_L1_sum_norm,mean_L2_norm,mean_num_changed,mean_frac_changed,mean_sparsity,topk_features_global,topk_features_global_mean_pct
+20,0.9,0.7663484275341034,0.8755123019218445,0.5999521404504776,0.2936531241983175,12.15,0.7147058823529411,0.2852941176470588,"grade,sqft_above,sqft_lot,sqft_living,yr_built","14.909,10.783,8.734,7.691,4.097"

@@ -1,0 +1,16 @@
+=== Classifier Evaluation ===
+Accuracy:  0.7680
+Precision: 0.7695
+Recall:    0.7680
+F1-score:  0.7686
+
+              precision    recall  f1-score   support
+
+     Class 0     0.8440    0.8178    0.8307      1065
+     Class 1     0.6789    0.6891    0.6840      1071
+     Class 2     0.6881    0.7029    0.6954      1067
+     Class 3     0.8627    0.8580    0.8603      1120
+
+    accuracy                         0.7680      4323
+   macro avg     0.7684    0.7670    0.7676      4323
+weighted avg     0.7695    0.7680    0.7686      4323
