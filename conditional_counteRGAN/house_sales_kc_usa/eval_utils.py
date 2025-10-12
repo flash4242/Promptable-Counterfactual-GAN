@@ -1,4 +1,4 @@
-# eval_utils.py
+# eval_utils.py (updated build_counterfactuals)
 import os
 from typing import Optional, Tuple
 import numpy as np
@@ -21,6 +21,166 @@ try:
     from eval_utils_mask_analysis import evaluate_pipeline_masks
 except Exception:
     evaluate_pipeline_masks = None  # If not available, evaluator will skip mask analysis
+
+
+def build_counterfactuals(G: torch.nn.Module,
+                          x: torch.Tensor,
+                          target_onehot: torch.Tensor,
+                          config: dict) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Build masked residuals and counterfactuals for a given batch.
+    Returns (masked_residual, x_cf).
+    Applies immutable mask and scaling consistently across training/eval.
+
+    This function is robust to several ResidualGenerator output signatures:
+      - (cont_residual, cat_logits, cat_samples)
+      - (cont_residual, cat_logits)  -- cat_logits can be a dict of per-feature logits
+      - (raw_residual, masked_residual)  -- legacy behavior
+
+    It reconstructs the full residual vector (for both continuous and categorical features)
+    in the same normalized space as training (i.e. MinMax-scaled [0,1]) and applies the
+    immutable-feature mask before returning masked_residual and clipped x_cf.
+    """
+    device = x.device
+    immutable_idx = config.get('immutable_idx', [])
+    enforce_hard_mask = config.get('enforce_hard_mask', True)
+
+    # Mask: 1 for modifiable features, 0 for immutable
+    mask = torch.ones_like(x, device=device)
+    if immutable_idx:
+        mask[:, immutable_idx] = 0.0
+
+    # get configuration about categorical / continuous features
+    categorical_info = config['categorical_info']
+    continuous_idx = config['continuous_idx']
+
+    # prepare cat_norm_maps like in training (maps category index -> normalized scalar value)
+    scaler = config['scaler']
+    cat_norm_maps = {}
+    if scaler is not None and hasattr(scaler, 'data_min_') and hasattr(scaler, 'data_max_'):
+        data_min = np.array(scaler.data_min_, dtype=float)
+        data_max = np.array(scaler.data_max_, dtype=float)
+        data_range = data_max - data_min
+        for fidx, info in categorical_info.items():
+            raw_vals = np.array(info['raw_values'], dtype=float)
+            norm_vals = (raw_vals - data_min[fidx]) / (data_range[fidx] + 1e-12)
+            cat_norm_maps[fidx] = torch.tensor(norm_vals, dtype=torch.float32, device=device)
+    else:
+        print("[build_counterfactuals] Warning: scaler not available or incomplete; categorical features may not be handled correctly.")
+
+
+
+    # Call generator. Be permissive about returned signature.
+    # Try passing temperature/hard args if present in config; otherwise just call minimal.
+    try:
+        # prefer to pass known args if generator expects them
+        out = G(x, target_onehot, mask=mask,
+                temperature=config.get('gumbel_tau', None), hard=True)
+    except TypeError:
+        print("[build_counterfactuals] Warning: Generator call with full args failed; provide minimal args!")
+
+    # normalize output handling
+    cont_residual = None
+    cat_logits = None
+    cat_samples = None
+    raw_residual = None
+    masked_residual = None
+
+    if isinstance(out, tuple) or isinstance(out, list):
+        if len(out) == 2:
+            # Could be (raw_residual, masked_residual) OR (cont_residual, cat_samples)
+            a, b = out
+            # detect shapes
+            if a.shape == x.shape:
+                raw_residual = a
+                masked_residual = b
+            else:
+                # assume a is cont_residual (bs, n_cont) and b is cat_samples/dict
+                cont_residual = a
+                # b could be dict or tensor; we'll handle below
+                if isinstance(b, dict):
+                    cat_samples = b
+                else:
+                    cat_logits = b
+        elif len(out) >= 3:
+            cont_residual = out[0]
+            cat_logits = out[1]
+            cat_samples = out[2]
+        else:
+            # unexpected -- try to interpret first two
+            cont_residual = out[0]
+            if len(out) > 1:
+                cat_logits = out[1]
+    else:
+        # single tensor - assume it's raw residual of full dim
+        if isinstance(out, torch.Tensor):
+            if out.shape == x.shape:
+                raw_residual = out
+            else:
+                # unexpected shape -> try to reshape? we'll treat as cont_residual
+                cont_residual = out
+
+    # If a raw_residual / masked_residual pair was returned by G, use it directly
+    if masked_residual is not None and raw_residual is not None:
+        if enforce_hard_mask:
+            masked_residual = masked_residual * mask
+        x_cf = torch.clamp(x + masked_residual, 0.0, 1.0)
+        return masked_residual, x_cf
+
+    # Otherwise reconstruct full residual from cont_residual + categorical outputs
+    bs, d_dim = x.shape
+    residual_full = torch.zeros((bs, d_dim), device=device, dtype=x.dtype)
+
+    # place continuous residuals
+    if cont_residual is not None:
+        # cont_residual expected shape: (bs, n_cont)
+        # map cont_residual columns to continuous_idx positions
+        if cont_residual.dim() == 1:
+            cont_residual = cont_residual.unsqueeze(0)
+        for i, feat_idx in enumerate(continuous_idx):
+            if i < cont_residual.size(1):
+                residual_full[:, feat_idx] = cont_residual[:, i]
+
+    # handle categorical outputs: prefer cat_samples (one-hot like dict), else derive from cat_logits
+    # cat_samples expected as dict: fidx -> (bs, ncat) tensor (one-hot-like)
+    if cat_samples is None and cat_logits is not None:
+        # try to interpret cat_logits
+        if isinstance(cat_logits, dict):
+            # for each feature index we have logits
+            derived_cat_samples = {}
+            for fidx, logits in cat_logits.items():
+                # logits shape: (bs, ncat)
+                if logits.dim() == 2:
+                    idx = torch.argmax(logits, dim=1)
+                    derived_cat_samples[fidx] = F.one_hot(idx, num_classes=logits.size(1)).float()
+            cat_samples = derived_cat_samples
+        else:
+            # cat_logits could be a single concatenated tensor; difficult to split here -> skip
+            cat_samples = {}
+
+    if isinstance(cat_samples, dict):
+        for fidx, sample_onehot in cat_samples.items():
+            if fidx not in cat_norm_maps:
+                continue
+            norm_vals = cat_norm_maps[fidx]  # (ncat,) tensor on device
+            # ensure sample_onehot is float and shape (bs, ncat)
+            if sample_onehot.dim() == 1:
+                sample_onehot = sample_onehot.unsqueeze(0)
+            # if sample is index vector, make one-hot
+            if sample_onehot.dtype in (torch.long, torch.int):
+                sample_onehot = F.one_hot(sample_onehot, num_classes=norm_vals.numel()).float()
+            # compute scalar = sum(onehot * norm_vals)
+            scalar_vals = sample_onehot.matmul(norm_vals)  # (bs,)
+            residual_full[:, fidx] = scalar_vals - x[:, fidx]
+
+    # masked residual = residual_full * mask
+    masked_residual = residual_full * mask
+    if enforce_hard_mask:
+        masked_residual = masked_residual * mask
+
+    x_cf = torch.clamp(x + masked_residual, 0.0, 1.0)
+    return masked_residual, x_cf
+
 
 
 def compute_metrics_per_target(generator: torch.nn.Module,
@@ -82,7 +242,7 @@ def compute_metrics_per_target(generator: torch.nn.Module,
                     mask_tensor[:, immutable_idx] = 0.0
 
                 # generator output (raw, masked residual)
-                _, masked_residual = generator(x, target_onehot, mask=mask_tensor)
+                masked_residual, x_cf = build_counterfactuals(generator, x, target_onehot, config)
                 x_cf = (x + masked_residual).detach()
 
                 # classifier outputs
@@ -233,7 +393,7 @@ def analyze_class_pair_sensitivity(G: torch.nn.Module,
                 target_vec = torch.full((x_src.size(0),), t, device=device, dtype=torch.long)
                 target_onehot = F.one_hot(target_vec, num_classes).float().to(device)
 
-                _, masked_residual = G(x_src, target_onehot, mask=mask_template)
+                masked_residual, _ = build_counterfactuals(G, x_src, target_onehot, config)
                 # mean absolute residual per feature across the source samples
                 mean_abs = torch.mean(torch.abs(masked_residual), dim=0).cpu().numpy()
                 deltas[s, t, :] = mean_abs
