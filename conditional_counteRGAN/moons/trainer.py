@@ -67,7 +67,6 @@ def train_countergan(config, X_train, y_train, clf_model):
 
             # sample binary mask correctly: 0 or 1 per feature
             modifiable_features = torch.randint(0, 2, (bs, num_features), device=device).float()
-
             raw_residual, masked_residual = G(x_batch, target_onehot, mask=modifiable_features)
             mask_penalty_pre = torch.mean(torch.abs(raw_residual * (1.0 - modifiable_features)))
 
