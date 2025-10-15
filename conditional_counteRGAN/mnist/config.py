@@ -12,7 +12,9 @@ class Config:
     lambda_adv = 1.0
     lambda_cls = 1.0
     lambda_reg = 2.5
-
+    lambda_mask = 2.0  # weight for mask penalty (to encourage sparse changes)
+    patch_size = 7  # size of square patch mask to modify (5x5)
+    num_modifiable_patches = 10  # number of patches that can be modified
     latent_dim = 100
     img_shape = (1, 28, 28)
     num_classes = 10

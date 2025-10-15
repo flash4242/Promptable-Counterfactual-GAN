@@ -7,7 +7,7 @@ from models.classifier import CNNClassifier
 from models.generator import ResidualGenerator
 from models.discriminator import Discriminator
 from trainer import train_classifier, train_countergan
-from eval_utils import evaluate_classifier, visualize_counterfactual_grid, evaluate_counterfactuals
+from eval_utils import evaluate_classifier, visualize_counterfactual_grid, evaluate_counterfactuals, evaluate_pipeline
 
 config = Config()
 device = config.device
@@ -37,14 +37,8 @@ evaluate_classifier(classifier, test_loader, device, save_dir=config.save_dir)
 print("Training CounterGAN...")
 train_countergan(generator, discriminator, classifier, train_loader, config, device)
 
-visualize_counterfactual_grid(generator, classifier, full_dataset, device, save_path=os.path.join(config.save_dir, "cf_grid.png"))
-
 print("Evaluating counterfactuals...")
-for x, y in test_loader:
-    y_target = torch.randint(0, config.num_classes, y.shape)
-    mask = (y_target == y)
-    y_target[mask] = (y_target[mask] + 1) % config.num_classes
+x, y = next(iter(test_loader)) 
+evaluate_pipeline(generator, classifier, x, y, full_dataset, config)
 
-    cf_metrics, x_cf = evaluate_counterfactuals(generator, classifier, x, y, y_target, device)
-    print(cf_metrics)
-    break
+

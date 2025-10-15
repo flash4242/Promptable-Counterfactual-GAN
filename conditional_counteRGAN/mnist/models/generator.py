@@ -36,7 +36,7 @@ class ResidualGenerator(nn.Module):
         self.embed = nn.Embedding(num_classes, H * W)
 
         # entry
-        self.conv_in = nn.Conv2d(C + 1, base_ch, kernel_size=3, padding=1)
+        self.conv_in = nn.Conv2d(C + 2, base_ch, kernel_size=3, padding=1)
         self.act = nn.LeakyReLU(0.2, inplace=True)
 
         # small stack of residual blocks (cheap but effective)
@@ -68,14 +68,19 @@ class ResidualGenerator(nn.Module):
             elif isinstance(m, nn.Embedding):
                 nn.init.normal_(m.weight, mean=0.0, std=0.01)
 
-    def forward(self, x, target):
+    def forward(self, x, target, mask=None):
         B, C, H, W = x.shape
         y_map = self.embed(target).view(B, 1, H, W).to(x.dtype).to(x.device)
-        inp = torch.cat([x, y_map], dim=1)
+        inp = torch.cat([x, y_map, mask], dim=1)
 
         h = self.act(self.conv_in(inp))
         h = self.resblocks(h)
         h = self.act(self.conv_mid(h))
 
-        residual = self.conv_out(h) * self.residual_scaling
-        return residual
+        raw_residual = self.conv_out(h) * self.residual_scaling
+        if mask is not None:
+            masked_residual = raw_residual * mask  # only modify allowed pixels
+        else:
+            print("WARNING: no mask provided to generator, modifying entire image")
+            masked_residual = raw_residual
+        return raw_residual, masked_residual

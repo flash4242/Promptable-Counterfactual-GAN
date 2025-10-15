@@ -42,6 +42,37 @@ def grad_norm(parameters):
     return torch.sqrt(sum((p.grad.data.norm()**2) for p in parameters if p.grad is not None)).item()
 
 
+def build_mask(x, patch_size, device, num_modifiable_patches=None):
+    """
+    Build a random binary mask with modifiable patches.
+    Vectorized for speed (no Python loops).
+    """
+    bs, c, h, w = x.shape
+    num_patches_h = h // patch_size
+    num_patches_w = w // patch_size
+    total_patches = num_patches_h * num_patches_w
+
+    # Random binary patch-level selection
+    patch_mask = torch.zeros((bs, 1, num_patches_h, num_patches_w), device=device)
+
+    if num_modifiable_patches is None or num_modifiable_patches >= total_patches:
+        # full random 0/1 per patch
+        patch_mask = torch.randint(0, 2, patch_mask.shape, device=device).float()
+    else:
+        # select a fixed number of modifiable patches per sample
+        for b in range(bs):
+            idx = torch.randperm(total_patches, device=device)[:num_modifiable_patches]
+            patch_mask.view(bs, -1)[b, idx] = 1.0
+
+    # Upsample patch mask to full image size
+    mask = F.interpolate(
+        patch_mask, size=(h, w), mode="nearest"
+    ).repeat(1, c, 1, 1)
+
+    return mask
+
+
+
 def train_countergan(generator, discriminator, classifier, train_loader, cfg, device):
     opt_g = optim.Adam(generator.parameters(), lr=cfg.g_lr)
     opt_d = optim.Adam(discriminator.parameters(), lr=cfg.d_lr)
@@ -61,9 +92,11 @@ def train_countergan(generator, discriminator, classifier, train_loader, cfg, de
             num_batches += 1
 
             target_y = torch.randint(0, cfg.num_classes, (bs,), device=device)
-            
-            residual = generator(x, target_y)
-            x_cf = torch.clamp(x + residual, -1.0, 1.0)
+            mask = build_mask(x, cfg.patch_size, device, cfg.num_modifiable_patches)     
+            raw_residual, masked_residual = generator(x, target_y, mask)
+            x_cf = torch.clamp(x + masked_residual, -1.0, 1.0)
+
+            mask_penalty_pre = torch.mean(torch.abs(raw_residual * (1.0 - mask)))
 
             # Discriminator update
             opt_d.zero_grad()
@@ -83,9 +116,9 @@ def train_countergan(generator, discriminator, classifier, train_loader, cfg, de
             g_fake_logits = discriminator(x_cf, target_y)
             g_adv = bce(g_fake_logits, torch.ones_like(g_fake_logits))
             g_cls = ce(classifier(x_cf), target_y)
-            reg_l1 = torch.abs(residual).mean()
+            reg_l1 = torch.abs(masked_residual).mean()
 
-            g_loss = cfg.lambda_adv * g_adv + cfg.lambda_cls * g_cls + cfg.lambda_reg * reg_l1
+            g_loss = cfg.lambda_adv * g_adv + cfg.lambda_cls * g_cls + cfg.lambda_reg * reg_l1 + cfg.lambda_mask * mask_penalty_pre
             g_loss.backward()
             opt_g.step()
 
@@ -101,7 +134,7 @@ def train_countergan(generator, discriminator, classifier, train_loader, cfg, de
             if batch_idx % 100 == 0:
                 print(f"[Epoch {epoch+1}/{cfg.num_epochs_gan}] batch {batch_idx} :: "
                       f"D(real)={d_real_p:.3f}, D(fake)={d_fake_p:.3f}, g_adv={g_adv.item():.4f}, "
-                      f"g_cls={g_cls.item():.4f}, reg={reg_l1.item():.6f}, residual_mean={residual.abs().mean().item():.4f}")
+                      f"g_cls={g_cls.item():.4f}, reg={reg_l1.item():.6f}, residual_mean={masked_residual.abs().mean().item():.4f}")
 
         g_losses.append(g_epoch / num_batches)
         d_losses.append(d_epoch / num_batches)
