@@ -209,25 +209,24 @@ def handle_user_answer(user_text: str, sample_source_img, sample_label, batch_te
         patch_size=PATCH_SIZE
     )
 
-    # also produce the sample heatmap (the more detailed one) for convenience
-    # build a batch mask and generate CF to build the sample heatmap images using make_and_save_heatmaps helpers:
-    with torch.no_grad():
-        raw_res, masked_res = GLOB_GENERATOR(x.to(DEVICE), torch.tensor([target], device=DEVICE), batch_mask.to(DEVICE))
-        x_cf = torch.clamp(x.to(DEVICE) + masked_res, -1.0, 1.0)
-    x_vis = ((x + 1.0) / 2.0).detach().cpu()
-    xcf_vis = ((x_cf + 1.0) / 2.0).detach().cpu()
-    mask_vis = batch_mask.detach().cpu()
-    metrics = eval.compute_masked_metrics(raw_res, masked_res, x.to(DEVICE), x_cf, batch_mask.to(DEVICE),
-                                      GLOB_CLASSIFIER, torch.tensor([label], device=DEVICE), torch.tensor([target], device=DEVICE), DEVICE)
-    # save sample heatmap
-    eval.make_and_save_heatmaps(x_vis, xcf_vis, mask_vis, metrics, save_dir=save_dir,
-                             y_true=torch.tensor([label]), y_target=torch.tensor([target]),
-                             classifier=GLOB_CLASSIFIER, device=DEVICE, max_samples=1)
+    # # also produce the sample heatmap (the more detailed one) for convenience
+    # # build a batch mask and generate CF to build the sample heatmap images using make_and_save_heatmaps helpers:
+    # with torch.no_grad():
+    #     raw_res, masked_res = GLOB_GENERATOR(x.to(DEVICE), torch.tensor([target], device=DEVICE), batch_mask.to(DEVICE))
+    #     x_cf = torch.clamp(x.to(DEVICE) + masked_res, -1.0, 1.0)
+    # x_vis = ((x + 1.0) / 2.0).detach().cpu()
+    # xcf_vis = ((x_cf + 1.0) / 2.0).detach().cpu()
+    # mask_vis = batch_mask.detach().cpu()
+    # metrics = eval.compute_masked_metrics(raw_res, masked_res, x.to(DEVICE), x_cf, batch_mask.to(DEVICE),
+    #                                   GLOB_CLASSIFIER, torch.tensor([label], device=DEVICE), torch.tensor([target], device=DEVICE), DEVICE)
+    # # save sample heatmap
+    # eval.make_and_save_heatmaps(x_vis, xcf_vis, mask_vis, metrics, save_dir=save_dir,
+    #                          y_true=torch.tensor([label]), y_target=torch.tensor([target]),
+    #                          classifier=GLOB_CLASSIFIER, device=DEVICE, max_samples=1)
 
     # Return file path(s) for Gradio to show
     return {
         "simulated_example": os.path.join(save_dir, "simulated_user_modification.png"),
-        "sample_heatmap": os.path.join(save_dir, "sample_0_src{}_tgt{}.png".format(label, target)),
         "patch_grid": os.path.join(save_dir, "patch_grid.png")
     }, f"Done. transformed {label} → {target} using patches {patches} (parsed)."
 
@@ -275,7 +274,6 @@ def build_app(generator_path: str, classifier_path: str):
                 btn_apply = gr.Button("Apply transformation (LLM parse)")
                 output_text = gr.Textbox(label="Status / messages", interactive=False)
                 out_sim_example = gr.Image(label="Simulated modification (allowed patches)")
-                out_sample_heatmap = gr.Image(label="Sample heatmap (Original/CF/Residual/Mask)")
 
         # Handlers
         def on_get_sample(txt):
@@ -296,10 +294,10 @@ def build_app(generator_path: str, classifier_path: str):
             if results is None:
                 return None, None, msg
             # return images
-            return results["simulated_example"], results["sample_heatmap"], msg
+            return results["simulated_example"], msg
 
         btn_apply.click(fn=on_apply, inputs=[user_answer, chosen_label_display],
-                        outputs=[out_sim_example, out_sample_heatmap, output_text])
+                        outputs=[out_sim_example, output_text])
 
     return demo
 
