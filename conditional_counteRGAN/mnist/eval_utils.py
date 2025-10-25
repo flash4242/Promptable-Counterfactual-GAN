@@ -450,7 +450,6 @@ def generate_counterfactuals(generator, classifier, x, y, y_target, mask, device
         x_cf = torch.clamp(x + masked_residual, -1.0, 1.0)
 
     return raw_residual, masked_residual, x_cf
-
 def save_user_modification_example(
     x_vis, simulated_patches, generator, classifier,
     y_true, y_target, device, save_dir, patch_size
@@ -462,12 +461,12 @@ def save_user_modification_example(
     """
     os.makedirs(save_dir, exist_ok=True)
 
-    # Take one sample
-    x_single = x_vis[0:1].to(device)  # (1,1,28,28)
+    # x_vis is already in [0,1]; re-normalize to [-1,1] for generator input
+    x_single = (x_vis[0:1].to(device) * 2.0) - 1.0  # (1,1,28,28)
     src_label = int(y_true[0].item())
     tgt_label = int(y_target[0].item())
 
-    # Create a mask directly from the simulated patch indices
+    # Create a mask from simulated patch indices
     H = W = 28
     num_patches_w = W // patch_size
     mask = torch.zeros((1, 1, H, W), device=device)
@@ -476,7 +475,7 @@ def save_user_modification_example(
         mask[:, :, i * patch_size:(i + 1) * patch_size,
              j * patch_size:(j + 1) * patch_size] = 1.0
 
-    # Generate residual and CF using the mask
+    # Generate counterfactual in the same normalized range [-1,1]
     with torch.no_grad():
         raw_residual, masked_residual = generator(x_single, torch.tensor([tgt_label], device=device), mask)
         x_cf = torch.clamp(x_single + masked_residual, -1.0, 1.0)
@@ -485,13 +484,13 @@ def save_user_modification_example(
         pred_idx = int(probs.argmax(dim=1))
         pred_conf = float(probs[0, pred_idx].item())
 
-    # Convert to [0,1] for visualization
+    # Convert back to [0,1] for visualization
     x_np = ((x_single + 1.0) / 2.0).cpu().squeeze().numpy()
     xcf_np = ((x_cf + 1.0) / 2.0).cpu().squeeze().numpy()
     diff_np = np.abs(xcf_np - x_np)
     mask_np = mask.cpu().squeeze().numpy()
 
-    # --- Figure ---
+    # Plot with same structure as heatmaps
     fig, axs = plt.subplots(1, 4, figsize=(9, 3), constrained_layout=True)
 
     axs[0].imshow(x_np, cmap="gray", vmin=0, vmax=1)
@@ -509,20 +508,20 @@ def save_user_modification_example(
 
     axs[3].imshow(x_np, cmap="gray", vmin=0, vmax=1)
     axs[3].imshow(mask_np, cmap="Greens", alpha=0.5, vmin=0, vmax=1)
-    axs[3].set_title("Patch mask", fontsize=9)
+    axs[3].set_title("Patch mask\n(green = modifiable)", fontsize=8)
     axs[3].axis("off")
 
-    # Title
     plt.suptitle(
         f"Src={src_label} → Tgt={tgt_label} | Pred={pred_idx} ({pred_conf:.2f}) | Allowed patches={simulated_patches}",
         fontsize=10, y=1.05
     )
 
-    save_path = os.path.join(save_dir, f"simulated_user_modification.png")
+    save_path = os.path.join(save_dir, "simulated_user_modification.png")
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     print(f"Saved simulated modification example: {save_path}")
+
 
 
 def evaluate_pipeline(generator, classifier, x, y, full_dataset, config):
