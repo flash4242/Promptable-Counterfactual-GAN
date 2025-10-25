@@ -28,7 +28,7 @@ def train_classifier(X_train, y_train, config):
     torch.save({"model_state_dict": clf.state_dict()}, config['clf_model_path'])
     return clf
 
-def train_countergan(config, X_train, y_train, clf_model):
+def train_countergan(generator, config, X_train, y_train, clf_model):
     device = config['cuda']
     seed = config['seed']
     torch.manual_seed(seed)
@@ -41,7 +41,7 @@ def train_countergan(config, X_train, y_train, clf_model):
     dataset = TensorDataset(X_t, y_t)
     loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True, drop_last=True)
 
-    G = ResidualGenerator(config['input_dim'], config['hidden_dim'], num_classes).to(device)
+    G = generator #ResidualGenerator(config['input_dim'], config['hidden_dim'], num_classes).to(device)
     D = Discriminator(config['input_dim'], config['hidden_dim'], num_classes).to(device)
 
     opt_G = optim.Adam(G.parameters(), lr=config['lr_G'])
@@ -123,4 +123,6 @@ def train_countergan(config, X_train, y_train, clf_model):
     plt.plot(g_losses, label="G_loss")
     plt.legend(); plt.savefig(os.path.join(config['out_dir'], "loss_curves.png"))
     plt.close()
-    return G
+
+    torch.save(G.state_dict(), config['generator_path'])
+    print(f"Generator saved to {config['generator_path']}")

@@ -12,5 +12,6 @@ config = {
     "hidden_dim": 32,
     "out_dir": "results",
     "clf_model_path": "results/classifier.pt",
+    "generator_path": "results/generator.pt",
     "cuda": "cuda" if __import__("torch").cuda.is_available() else "cpu",
 }

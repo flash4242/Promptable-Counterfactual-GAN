@@ -4,8 +4,10 @@ from data_utils import load_and_preprocess
 from trainer import train_classifier, train_countergan
 from eval_utils import evaluate_pipeline
 import os
+import numpy
 import torch
 from models.nn_classifier import NNClassifier
+from models.generator import ResidualGenerator
 import torch.optim as optim
 import torch.nn as nn
 
@@ -40,6 +42,19 @@ def get_classifier(X_train, y_train, config):
 if __name__ == "__main__":
     X_train, X_test, y_train, y_test = load_and_preprocess(config['seed'])
     clf = get_classifier(X_train, y_train, config)
-    G = train_countergan(config, X_train, y_train, clf)
-    metrics_df = evaluate_pipeline(G, clf, X_test, y_test, config)
+    num_classes = int(numpy.unique(y_train).size)
+    generator = ResidualGenerator(config['input_dim'], config['hidden_dim'], num_classes=num_classes).to(config['cuda'])
+
+    generator_path = config['generator_path']
+    if os.path.exists(generator_path):
+        print(f"Loading pretrained generator from {generator_path}...")
+    else:
+        print("Training CounterGAN and saving generator...")
+        train_countergan(generator, config, X_train, y_train, clf)
+
+    generator.load_state_dict(torch.load(generator_path, map_location=config['cuda']))
+    generator.eval()
+    for p in generator.parameters():
+        p.requires_grad = False
+    metrics_df = evaluate_pipeline(generator, clf, X_test, y_test, config)
     print(metrics_df)
