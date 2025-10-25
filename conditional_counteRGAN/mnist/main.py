@@ -34,8 +34,17 @@ for p in classifier.parameters():
 
 evaluate_classifier(classifier, test_loader, device, save_dir=config.save_dir)
 
-print("Training CounterGAN...")
-train_countergan(generator, discriminator, classifier, train_loader, config, device)
+generator_path = config.generator_path
+if os.path.exists(generator_path):
+    print(f"Loading pretrained generator from {generator_path}...")
+else:
+    print("Training CounterGAN and saving generator...")
+    train_countergan(generator, discriminator, classifier, train_loader, config, device)
+
+generator.load_state_dict(torch.load(generator_path, map_location=device))
+generator.eval()
+for p in generator.parameters():
+    p.requires_grad = False
 
 print("Evaluating counterfactuals...")
 x, y = next(iter(test_loader)) 

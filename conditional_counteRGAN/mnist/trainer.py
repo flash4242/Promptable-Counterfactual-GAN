@@ -158,3 +158,6 @@ def train_countergan(generator, discriminator, classifier, train_loader, cfg, de
     plt.savefig(save_path)
     plt.close()
     print(f"Saved GAN loss curves to {save_path}")
+
+    torch.save(generator.state_dict(), cfg.generator_path)
+    print(f"Generator saved to {cfg.generator_path}")

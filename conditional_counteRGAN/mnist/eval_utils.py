@@ -168,53 +168,94 @@ def visualize_counterfactual_grid(generator, classifier, dataset, device,
     print(f"Saved CF grid: {save_path}")
 
 
-def build_patch_mask_for_batch(x: torch.Tensor, patch_size: int = 5, device=None,
-                               shared_per_batch: bool = False) -> torch.Tensor:
+def build_patch_mask_for_batch(
+    x: torch.Tensor,
+    patch_size: int = 5,
+    device=None,
+    shared_per_batch: bool = False,
+    modifiable_patches: list = None,
+    return_single_mask: bool = True,
+    randomize_per_sample: bool = True,
+    min_patches: int = 5,
+    max_patches: int = None,
+):
     """
-    x: (B, C, H, W) image batch (or (B, D) flattened) in [-1,1]
-    returns mask tensor of same shape as x with 0/1 float values (1 = modifiable)
-    If shared_per_batch=True we pick one mask and copy it to all batch entries.
+    Build patch-based binary masks for a batch.
+
+    Args:
+        x: (B, C, H, W) tensor
+        patch_size: patch side length in px
+        device: torch device (defaults to x.device)
+        shared_per_batch: if True, use the same mask for every sample
+        modifiable_patches: list of patch indices provided by user (or None to auto-randomize)
+        return_single_mask: also return single representative mask (first sample)
+        randomize_per_sample: if True, each sample gets its own random selection (ignored if modifiable_patches provided)
+        min_patches: minimum number of modifiable patches when randomizing
+        max_patches: maximum number of modifiable patches when randomizing (defaults to total_patches // 2)
+    Returns:
+        (batch_mask, single_mask) if return_single_mask else batch_mask
+        batch_mask shape: (B, C, H, W); single_mask: (1, C, H, W)
     """
     if device is None:
         device = x.device
-    bs = x.shape[0]
-    if x.ndim == 4:
-        _, C, H, W = x.shape
-        mask = torch.zeros_like(x, device=device)
-        # build a single random patch-grid mask (coarse) and optionally replicate
-        grid_mask = torch.zeros((1, 1, H, W), device=device)
-        for i in range(0, H, patch_size):
-            for j in range(0, W, patch_size):
-                val = float(torch.randint(0, 2, (1,), device=device).item())
-                grid_mask[:, :, i:i+patch_size, j:j+patch_size] = val
-        if shared_per_batch:
-            mask = grid_mask.repeat(bs, C, 1, 1)
+    bs, C, H, W = x.shape
+    num_patches_h = H // patch_size
+    num_patches_w = W // patch_size
+    total_patches = num_patches_h * num_patches_w
+
+    # safe defaults / clipping
+    if max_patches is None:
+        max_patches = total_patches // 2
+    min_patches = max(1, int(min_patches))
+    max_patches = min(total_patches, int(max_patches))
+    if min_patches > max_patches:
+        min_patches = max_patches
+
+    def create_mask_from_indices(indices):
+        """Create (1,1,H,W) mask from list of patch indices."""
+        m = torch.zeros((1, 1, H, W), device=device, dtype=x.dtype)
+        for idx in indices:
+            if idx < 0 or idx >= total_patches:
+                continue
+            i, j = divmod(idx, num_patches_w)
+            m[:, :, i * patch_size:(i + 1) * patch_size,
+                  j * patch_size:(j + 1) * patch_size] = 1.0
+        return m
+
+    # If modifiable_patches is None, treat it as "randomize"
+    # This avoids the empty-mask pitfall when randomize_per_sample==False.
+    use_random = (modifiable_patches is None) or randomize_per_sample
+
+    if shared_per_batch:
+        # one mask shared across the batch
+        if use_random:
+            k = np.random.randint(min_patches, max_patches + 1)
+            chosen = np.random.choice(range(total_patches), size=k, replace=False).tolist()
         else:
-            # different mask per datapoint
-            # draw bs independent patch-grids
-            mask_list = []
-            for _ in range(bs):
-                gm = torch.zeros((1, 1, H, W), device=device)
-                for i in range(0, H, patch_size):
-                    for j in range(0, W, patch_size):
-                        val = float(torch.randint(0, 2, (1,), device=device).item())
-                        gm[:, :, i:i+patch_size, j:j+patch_size] = val
-                mask_list.append(gm)
-            mask = torch.cat(mask_list, dim=0)  # (B,1,H,W)
-            mask = mask.repeat(1, C, 1, 1)      # match channels
-    elif x.ndim == 2:
-        # flattened case (B, D) - produce 2D logical mask then flatten
-        B, D = x.shape
-        # assume we can't patch in flattened easily; produce per-feature random mask
-        mask = torch.randint(0, 2, (B, D), device=device).float()
+            # user-specified list
+            chosen = list(modifiable_patches)
+        single_mask = create_mask_from_indices(chosen)
+        batch_mask = single_mask.repeat(bs, C, 1, 1)
+
     else:
-        raise ValueError("Unsupported x ndim: expected 2 or 4.")
-    return mask.float()
+        masks = []
+        for b in range(bs):
+            if use_random:
+                k = np.random.randint(min_patches, max_patches + 1)
+                chosen = np.random.choice(range(total_patches), size=k, replace=False).tolist()
+            else:
+                # modifiable_patches is provided and we must use that same selection for every sample
+                chosen = list(modifiable_patches)
+            masks.append(create_mask_from_indices(chosen))
+
+        # (B,1,H,W) -> repeat channels -> (B,C,H,W)
+        batch_mask = torch.cat(masks, dim=0).repeat(1, C, 1, 1)
+        single_mask = masks[0].repeat(1, C, 1, 1)
+
+    return (batch_mask, single_mask) if return_single_mask else batch_mask
 
 
-# ------------------------------------------------------------------
-# Helper: compute requested metrics given raw & masked residuals + mask + classifier
-# ------------------------------------------------------------------
+
 def compute_masked_metrics(raw_residual: torch.Tensor, masked_residual: torch.Tensor,
                            x: torch.Tensor, x_cf: torch.Tensor,
                            mask: torch.Tensor, classifier: torch.nn.Module,
@@ -260,14 +301,17 @@ def compute_masked_metrics(raw_residual: torch.Tensor, masked_residual: torch.Te
 def make_and_save_heatmaps(x: torch.Tensor, x_cf: torch.Tensor, mask: torch.Tensor,
                            metrics: Dict, save_dir: str,
                            y_true: torch.Tensor = None, y_target: torch.Tensor = None,
+                           classifier: torch.nn.Module = None, device=None,
                            max_samples: int = 16):
     """
     Create per-sample visualizations and a tiled grid for the batch.
-    For each sample we save:
-        [Original | Counterfactual | |Δ| heatmap | Patch-mask overlay]
     Titles show source→target classes and key metrics.
     """
     os.makedirs(save_dir, exist_ok=True)
+    if device is None:
+        device = x.device
+    if classifier is not None:
+        classifier.eval()
 
     # --- convert to CPU numpy [B,H,W] ---
     def to_numpy_img(t):
@@ -288,6 +332,15 @@ def make_and_save_heatmaps(x: torch.Tensor, x_cf: torch.Tensor, mask: torch.Tens
 
     # --- per-sample figures ---
     for i in range(n_show):
+        # get classifier prediction and confidence for the CF image
+        pred_label, pred_conf = None, None
+        if classifier is not None:
+            with torch.no_grad():
+                logits = classifier(x_cf[i:i+1].to(device))
+                probs = torch.softmax(logits, dim=1)
+                pred_idx = int(probs.argmax(dim=1))
+                pred_label = pred_idx
+                pred_conf = float(probs[0, pred_idx].item())
         fig, axs = plt.subplots(1, 4, figsize=(10, 2.8), constrained_layout=True)
 
         axs[0].imshow(x_np[i], cmap="gray", vmin=0, vmax=1)
@@ -299,7 +352,7 @@ def make_and_save_heatmaps(x: torch.Tensor, x_cf: torch.Tensor, mask: torch.Tens
         axs[1].axis("off")
 
         im = axs[2].imshow(diff_np[i], cmap="hot", vmin=0, vmax=max(1e-6, diff_np.max()))
-        axs[2].set_title("|Δ|", fontsize=9)
+        axs[2].set_title("Residual", fontsize=9)
         axs[2].axis("off")
         plt.colorbar(im, ax=axs[2], fraction=0.046, pad=0.02)
 
@@ -311,12 +364,7 @@ def make_and_save_heatmaps(x: torch.Tensor, x_cf: torch.Tensor, mask: torch.Tens
         # --- Add a clean super-title with classes + key metrics ---
         src_label = int(y_true[i].item()) if y_true is not None else "?"
         tgt_label = int(y_target[i].item()) if y_target is not None else "?"
-        plt.suptitle(
-            f"Src={src_label} → Tgt={tgt_label} | "
-            f"FR_mac={metrics['Class_flip_rate_mean']:.3f} | "
-            f"Allowed_L1={metrics['Residual_L1_norm_in_allowed_patches']:.4f}",
-            fontsize=10, y=1.05
-        )
+        plt.suptitle(f"Src={src_label} → Tgt={tgt_label}, | Pred={pred_label}, Conf={pred_conf:.2f}", fontsize=10, y=1.05)
 
         save_p = os.path.join(save_dir, f"sample_{i}_src{src_label}_tgt{tgt_label}.png")
         plt.savefig(save_p, dpi=150, bbox_inches="tight")
@@ -350,12 +398,6 @@ def make_and_save_heatmaps(x: torch.Tensor, x_cf: torch.Tensor, mask: torch.Tens
 def visualize_patch_grid(img, patch_size, save_path=None, alpha=0.6):
     """
     Visualize patch grid overlay on top of an MNIST-like image.
-
-    Args:
-        img (torch.Tensor or np.ndarray): Image in range [0,1] or [-1,1], shape (1,28,28) or (28,28)
-        patch_size (int): Patch size in pixels (e.g., 7 -> 4x4 grid)
-        save_path (str): If given, saves figure to this path
-        alpha (float): Overlay transparency
     """
     if torch.is_tensor(img):
         img = img.detach().cpu().squeeze().numpy()
@@ -370,12 +412,12 @@ def visualize_patch_grid(img, patch_size, save_path=None, alpha=0.6):
     fig, ax = plt.subplots(figsize=(4, 4))
 
     # Proper extent alignment ensures grid lines sit on pixel boundaries
-    ax.imshow(img, cmap="Greens", alpha=alpha, extent=[0, w, h, 0])
+    ax.imshow(img, cmap="Oranges", alpha=alpha, extent=[0, w, h, 0])
 
     # Grid lines exactly on patch borders
     ax.set_xticks(np.arange(0, w + 1, patch_size))
     ax.set_yticks(np.arange(0, h + 1, patch_size))
-    ax.grid(color="lime", linewidth=1)
+    ax.grid(color="darkred", linewidth=1)
 
     # Draw patch numbers centered in each patch
     for i in range(num_patches_h):
@@ -397,44 +439,158 @@ def visualize_patch_grid(img, patch_size, save_path=None, alpha=0.6):
     plt.close()
 
 
-def evaluate_pipeline(generator, classifier, x, y, full_dataset, config):
-    """
-    Runs one batch from test_loader, builds random 5x5 patch masks per datapoint,
-    computes counterfactuals via the generator (calling the mask-aware forward),
-    computes metrics (FR_mac, FR_max, Allowed_L1, mask_penalty_pre),
-    and saves visualizations per-sample + batch overview.
-    """
-    device = config.device
+
+
+def generate_counterfactuals(generator, classifier, x, y, y_target, mask, device):
     generator.eval()
     classifier.eval()
 
-    x, y = x.to(device), y.to(device)
-    bs = x.size(0)
-    y_target = torch.randint(0, config.num_classes, y.shape, device=device)
-    mask_eq = (y_target == y)
-    y_target[mask_eq] = (y_target[mask_eq] + 1) % config.num_classes # ensure target != source
-
-    # build 5x5 patch masks (different mask per datapoint)
-    mask = build_patch_mask_for_batch(x, patch_size=config.patch_size,
-                                        device=device, shared_per_batch=False)
-
     with torch.no_grad():
-        raw_residual, masked_residual = generator(x, y_target.to(device), mask.to(device))
+        raw_residual, masked_residual = generator(x, y_target, mask)
         x_cf = torch.clamp(x + masked_residual, -1.0, 1.0)
 
-    metrics = compute_masked_metrics(raw_residual, masked_residual, x, x_cf, mask, classifier, y, y_target, device)
+    return raw_residual, masked_residual, x_cf
 
-    # prepare visuals: convert to [0,1] for display
+def save_user_modification_example(
+    x_vis, simulated_patches, generator, classifier,
+    y_true, y_target, device, save_dir, patch_size
+):
+    """
+    Visualize one digit with its patch grid and a simulated allowed-patch modification.
+    Follows the same format as sample heatmaps: Original | Counterfactual | Residual | Patch Mask.
+    Title shows src→tgt classes, prediction, and confidence.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Take one sample
+    x_single = x_vis[0:1].to(device)  # (1,1,28,28)
+    src_label = int(y_true[0].item())
+    tgt_label = int(y_target[0].item())
+
+    # Create a mask directly from the simulated patch indices
+    H = W = 28
+    num_patches_w = W // patch_size
+    mask = torch.zeros((1, 1, H, W), device=device)
+    for idx in simulated_patches:
+        i, j = divmod(idx, num_patches_w)
+        mask[:, :, i * patch_size:(i + 1) * patch_size,
+             j * patch_size:(j + 1) * patch_size] = 1.0
+
+    # Generate residual and CF using the mask
+    with torch.no_grad():
+        raw_residual, masked_residual = generator(x_single, torch.tensor([tgt_label], device=device), mask)
+        x_cf = torch.clamp(x_single + masked_residual, -1.0, 1.0)
+        logits = classifier(x_cf)
+        probs = torch.softmax(logits, dim=1)
+        pred_idx = int(probs.argmax(dim=1))
+        pred_conf = float(probs[0, pred_idx].item())
+
+    # Convert to [0,1] for visualization
+    x_np = ((x_single + 1.0) / 2.0).cpu().squeeze().numpy()
+    xcf_np = ((x_cf + 1.0) / 2.0).cpu().squeeze().numpy()
+    diff_np = np.abs(xcf_np - x_np)
+    mask_np = mask.cpu().squeeze().numpy()
+
+    # --- Figure ---
+    fig, axs = plt.subplots(1, 4, figsize=(9, 3), constrained_layout=True)
+
+    axs[0].imshow(x_np, cmap="gray", vmin=0, vmax=1)
+    axs[0].set_title("Original", fontsize=9)
+    axs[0].axis("off")
+
+    axs[1].imshow(xcf_np, cmap="gray", vmin=0, vmax=1)
+    axs[1].set_title("Counterfactual", fontsize=9)
+    axs[1].axis("off")
+
+    im = axs[2].imshow(diff_np, cmap="hot", vmin=0, vmax=max(1e-6, diff_np.max()))
+    axs[2].set_title("Residual", fontsize=9)
+    axs[2].axis("off")
+    plt.colorbar(im, ax=axs[2], fraction=0.046, pad=0.02)
+
+    axs[3].imshow(x_np, cmap="gray", vmin=0, vmax=1)
+    axs[3].imshow(mask_np, cmap="Greens", alpha=0.5, vmin=0, vmax=1)
+    axs[3].set_title("Patch mask", fontsize=9)
+    axs[3].axis("off")
+
+    # Title
+    plt.suptitle(
+        f"Src={src_label} → Tgt={tgt_label} | Pred={pred_idx} ({pred_conf:.2f}) | Allowed patches={simulated_patches}",
+        fontsize=10, y=1.05
+    )
+
+    save_path = os.path.join(save_dir, f"simulated_user_modification.png")
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Saved simulated modification example: {save_path}")
+
+
+def evaluate_pipeline(generator, classifier, x, y, full_dataset, config):
+    """
+    Orchestrator: runs the entire evaluation and visualization pipeline.
+    """
+    device = config.device
+    x, y = x.to(device), y.to(device)
+    bs = x.size(0)
+
+    # 1. Simulate patch selection (replaceable with user input)
+    simulated_patches = config.user_input_patches
+
+    # 2. Build batch + single mask
+    batch_mask, single_mask = build_patch_mask_for_batch(
+        x,
+        patch_size=config.patch_size,
+        device=device,
+        shared_per_batch=False,
+        modifiable_patches=None,  # optional user input
+        return_single_mask=True,
+        randomize_per_sample=(config.user_input_patches is None),
+        min_patches=config.min_modifiable_patches,      # e.g., 6 or 8
+        max_patches=config.max_modifiable_patches       # optional
+    )
+
+    # 3. Assign target labels (different from source)
+    y_target = torch.randint(0, config.num_classes, y.shape, device=device)
+    y_target[y_target == y] = (y_target[y_target == y] + 1) % config.num_classes
+
+    # 4. Generate counterfactuals
+    raw_residual, masked_residual, x_cf = generate_counterfactuals(
+        generator, classifier, x, y, y_target, batch_mask, device
+    )
+
+    # 5. Compute metrics
+    metrics = compute_masked_metrics(raw_residual, masked_residual, x, x_cf,
+                                     batch_mask, classifier, y, y_target, device)
+
+    # 6. Save visualizations
+    save_dir = os.path.join(config.save_dir, "eval_visuals")
+    os.makedirs(save_dir, exist_ok=True)
+
     x_vis = ((x + 1.0) / 2.0).detach().cpu()
     x_cf_vis = ((x_cf + 1.0) / 2.0).detach().cpu()
-    mask_vis = mask.detach().cpu()
+    mask_vis = batch_mask.detach().cpu()
 
-    # save heatmaps per sample and batch overview
-    save_dir = os.path.join(config.save_dir, "eval_visuals")
-    make_and_save_heatmaps(x_vis, x_cf_vis, mask_vis, metrics, save_dir=save_dir,y_true=y, y_target=y_target, max_samples=min(16, bs))
-    visualize_counterfactual_grid(generator, classifier, full_dataset, device, save_path=os.path.join(config.save_dir, "cf_grid.png"))
-    visualize_patch_grid(x_vis[0], patch_size=config.patch_size, save_path=os.path.join(save_dir, "patch_grid.png"))
+    make_and_save_heatmaps(
+        x_vis, x_cf_vis, mask_vis, metrics, classifier=classifier, device=device,
+        save_dir=save_dir, y_true=y, y_target=y_target, max_samples=min(16, bs)
+    )
+
+    visualize_counterfactual_grid(
+        generator, classifier, full_dataset, device,
+        save_path=os.path.join(config.save_dir, "cf_grid.png")
+    )
+    visualize_patch_grid(
+        x_vis[0], config.patch_size,
+        save_path=os.path.join(save_dir, "patch_grid.png")
+    )
+
+    # 7. Show simulated allowed-patch modification
+    save_user_modification_example(
+        x_vis, simulated_patches, generator, classifier,
+        y_true=y, y_target=y_target, device=device,
+        save_dir=save_dir, patch_size=config.patch_size
+    )
 
 
     print("Evaluation metrics:", metrics)
-
+    print(f"Saved all visuals and patch example in: {save_dir}")
