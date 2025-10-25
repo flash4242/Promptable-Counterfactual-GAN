@@ -183,7 +183,7 @@ def grad_norm(params):
     return sum(p.grad.norm().item() for p in params if p.grad is not None)
 
 
-def train_countergan(config, X_train, y_train, clf_model):
+def train_countergan(generator, config, X_train, y_train, clf_model):
     device = config['cuda']
     torch.manual_seed(config.get('seed', 42))
     np.random.seed(config.get('seed', 42))
@@ -224,14 +224,7 @@ def train_countergan(config, X_train, y_train, clf_model):
             cat_norm_maps[fidx] = torch.tensor(vals / max(1.0, (n - 1)), dtype=torch.float32, device=device)
 
     # instantiate models
-    G = ResidualGenerator(
-        config['input_dim'], config['hidden_dim'], num_classes,
-        continuous_idx=continuous_idx,
-        categorical_info={k: {"n": v["n"], "raw_values": v["raw_values"]} for k, v in categorical_info.items()},
-        n_blocks=config.get('n_blocks', 5),
-        residual_scaling=config.get('residual_scaling', 0.1),
-        tau=config.get('gumbel_tau', 1.0)
-    ).to(device)
+    G = generator
     D = Discriminator(config['input_dim'], config['hidden_dim'], num_classes).to(device)
 
     opt_G = optim.Adam(G.parameters(), lr=config['lr_G'])
@@ -380,4 +373,6 @@ def train_countergan(config, X_train, y_train, clf_model):
     plt.savefig(os.path.join(config['out_dir'], 'loss_curves.png'))
     plt.close()
 
-    return G
+    # Save generator model
+    torch.save(generator.state_dict(), config['generator_path'])
+    print(f"Saved generator model to {config['generator_path']}")

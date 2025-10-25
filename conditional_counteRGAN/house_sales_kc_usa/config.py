@@ -31,10 +31,12 @@ config = {
     'out_dir_mask': mask_dir,
     'gumbel_tau': 0.5,  # Gumbel-Softmax temperature
     'scaler': None,  # to be set after loading data
+    'openai_api_key': None,
 
     # Classifier-specific outputs
     'clf_dir': clf_dir,
     'clf_model_path': 'clf_model.pt',
+    'generator_path': 'generator_model.pt',
     'clf_loss_plot': os.path.join(clf_dir, 'loss_plot.png'),
 
     'immutable_features': ["lat", "long", "yr_built"], # "yr_renovated"

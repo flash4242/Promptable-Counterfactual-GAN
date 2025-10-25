@@ -2,7 +2,8 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 
-def load_and_preprocess(data_path, seed):
+def load_and_preprocess(data_path):
+    seed = 42
     df = pd.read_csv(data_path)
     df = df.drop(columns=['id', 'date', 'zipcode'])
     # Label the price into 4 quartile-based bins and get bin intervals

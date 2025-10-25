@@ -726,16 +726,4 @@ def evaluate_pipeline(generator: torch.nn.Module,
         except Exception as e:
             print(f"[pipeline] evaluate_pipeline_masks failed: {e}")
 
-    # t-SNE visualization of classifier decision boundary
-    try:
-        plot_tsne_with_decision_boundary(
-            classifier,
-            X_test,
-            y_test,
-            save_path=os.path.join(out, "tsne_classifier_boundary.png"),
-            device=config.get('cuda', 'cpu')
-        )
-    except Exception as e:
-        print(f"[pipeline] t-SNE plotting failed: {e}")
-
     return metrics_df

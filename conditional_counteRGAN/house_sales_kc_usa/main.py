@@ -3,13 +3,15 @@ import torch
 from config import config
 from data_utils import load_and_preprocess
 from models.nn_classifier import NNClassifier
+from models.generator import ResidualGenerator
 from trainer import train_countergan, train_classifier
 from eval_utils import evaluate_classifier
 import os
+import numpy
 from eval_utils import evaluate_pipeline
 
 # Load and preprocess
-X_train, X_test, y_train, y_test, scaler = load_and_preprocess(config['data_path'], config['seed'])
+X_train, X_test, y_train, y_test, scaler = load_and_preprocess(config['data_path'])
 config['scaler'] = scaler  # set the scaler in config for denormalization in evaluation
 
 device = config['cuda']
@@ -39,9 +41,26 @@ metrics = evaluate_classifier(
     class_names=[f"Class {i}" for i in range(config['num_classes'])]
 )
 
-# Train CounterGAN
-G = train_countergan(config, X_train, y_train, classifier)
+num_classes = int(numpy.unique(y_train).size)
+generator = ResidualGenerator(
+    config['input_dim'], config['hidden_dim'], num_classes,
+    continuous_idx=config['continuous_idx'],
+    categorical_info={k: {"n": v["n"], "raw_values": v["raw_values"]} for k, v in config["categorical_info"].items()},
+    tau=config['gumbel_tau']
+).to(device)
+
+generator_path = config['generator_path']
+if os.path.exists(generator_path):
+    print(f"Loading pretrained generator from {generator_path}...")
+else:
+    print("Training CounterGAN and saving generator...")
+    train_countergan(generator, config, X_train, y_train, classifier)
+
+generator.load_state_dict(torch.load(generator_path, map_location=config['cuda']))
+generator.eval()
+for p in generator.parameters():
+    p.requires_grad = False
 
 # evaluate & save everything
-metrics_df = evaluate_pipeline(G, classifier, X_test, y_test, config)
+metrics_df = evaluate_pipeline(generator, classifier, X_test, y_test, config)
 print(metrics_df)
