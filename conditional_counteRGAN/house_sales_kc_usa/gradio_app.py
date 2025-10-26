@@ -7,10 +7,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 import pandas as pd
-from tabulate import tabulate
 
 from config import config
 from data_utils import load_and_preprocess
+from eval_utils import build_counterfactuals
 
 # ===== Optional OpenAI API =====
 try:
@@ -28,10 +28,11 @@ except Exception:
 from models.nn_classifier import NNClassifier
 from models.generator import ResidualGenerator
 
-device = config["cuda"]
-X_train, X_test, y_train, y_test, scaler = load_and_preprocess(config["data_path"])
-config["scaler"] = scaler
+device = config.get("cuda", "cpu")
+X_train, X_test, y_train, y_test = load_and_preprocess(config["data_path"], config)
+scaler = config['scaler']
 num_classes = config["num_classes"]
+feature_names = config.get("feature_names", [f"feat_{i}" for i in range(X_train.shape[1])])
 
 clf = NNClassifier(config['input_dim'], output_dim=config['num_classes']).to(device)
 clf.load_state_dict(torch.load(config["clf_model_path"], map_location=device))
@@ -47,35 +48,25 @@ G.load_state_dict(torch.load(config["generator_path"], map_location=device))
 G.eval()
 
 
-# ===== Utilities =====
 def describe_classes(y):
-    """Summarize quartile ranges."""
-    unique, counts = np.unique(y, return_counts=True)
-    summary = {f"Class {int(u)}": int(c) for u, c in zip(unique, counts)}
+    bins = config['bins']
+    summary = {f"Class {i}": f"${bins[i]:,.0f} - ${bins[i+1]:,.0f}" for i in range(len(bins) - 1)}
     return summary
 
 
-def plot_class_ranges(y):
-    """Show class distribution."""
-    plt.figure(figsize=(6, 4))
-    plt.hist(y, bins=np.arange(-0.5, max(y)+1.5, 1), rwidth=0.8)
-    plt.xticks(range(int(max(y)) + 1))
-    plt.xlabel("Class (Quartile)")
-    plt.ylabel("Count")
-    plt.title("House Price Quartile Classes")
-    plt.tight_layout()
-    return plt.gcf()
+def get_random_sample_from_class(source_class):
+    idxs = np.where(y_train == int(source_class))[0]
+    if len(idxs) == 0:
+        raise ValueError(f"No samples found for class {source_class}")
+    choice = np.random.choice(idxs)
+    x_sample = X_train[choice].astype(np.float32)
+    return x_sample, int(choice)
 
 
 def parse_natural_instruction(instruction, feature_names, immutable_idx):
-    """
-    Parse user instruction into a binary mask.
-    Fallback: regex-based if LLM is unavailable.
-    """
     mask = np.zeros(len(feature_names), dtype=np.float32)
 
     if client:
-        # Use GPT parsing
         prompt = f"""
         You are a system that selects which housing features can be modified
         based on a user's natural-language instruction. The available features are:
@@ -98,101 +89,156 @@ def parse_natural_instruction(instruction, feature_names, immutable_idx):
             print("LLM parsing failed, fallback to regex:", e)
             allowed = []
     else:
-        # Regex fallback
-        instruction = instruction.lower()
+        instruction = (instruction or "").lower()
         allowed = []
         for feat in feature_names:
-            if re.search(rf"\b{feat.lower()}\b", instruction):
+            if re.search(rf"\b{re.escape(feat.lower())}\b", instruction):
                 allowed.append(feat)
-        # simple synonyms
         synonyms = {
             "bed": "bedrooms", "bath": "bathrooms", "living": "sqft_living",
             "lot": "sqft_lot", "renovation": "yr_renovated", "grade": "grade",
             "view": "view", "condition": "condition", "floor": "floors"
         }
         for word, feat in synonyms.items():
-            if re.search(rf"\b{word}\b", instruction):
+            if re.search(rf"\b{re.escape(word)}\b", instruction):
                 allowed.append(feat)
 
-    # Convert to mask
     for i, feat in enumerate(feature_names):
         if i in immutable_idx:
             mask[i] = 0
         elif feat in allowed:
             mask[i] = 1
-    return mask, allowed
+        else:
+            mask[i] = 0
+    return mask, sorted(list(set(allowed)))
 
 
-# ===== Core Logic =====
 def show_class_summary():
-    return plot_class_ranges(y_train), describe_classes(y_train)
+    return describe_classes(y_train)
+
 
 def show_sample(source_class):
     try:
-        x_sample, y_sample = get_random_sample_from_class(source_class)
+        x_sample, idx = get_random_sample_from_class(source_class)
         x_tensor = torch.tensor(x_sample, dtype=torch.float32, device=device).unsqueeze(0)
         preds = clf(x_tensor).softmax(1).detach().cpu().numpy().squeeze()
 
-        # --- make a pretty table of feature:value pairs ---
-        df = pd.DataFrame([x_sample], columns=feature_names)
-        table_html = df.to_html(index=False)
+        try:
+            denorm = scaler.inverse_transform(x_sample.reshape(1, -1)).squeeze()
+            df_table = pd.DataFrame({"feature": feature_names, "value": denorm})
+        except Exception:
+            df_table = pd.DataFrame({"feature": feature_names, "value (norm)": x_sample})
+
+        table_html = df_table.to_html(index=False)
 
         pred_str = "\n".join([f"Class {i}: {p:.3f}" for i, p in enumerate(preds)])
-        return table_html, pred_str
+        state_payload = {"x_sample": x_sample.tolist(), "idx": int(idx), "source_class": int(source_class)}
+        return state_payload, table_html, pred_str
 
     except Exception as e:
         import traceback
         print("Error in show_sample():", traceback.format_exc())
-        return None, f"Error: {e}"
+        return None, None, f"Error: {e}"
 
 
-def generate_counterfactual(x_sample, source_class, target_class, user_instruction):
-    x_sample = np.array(x_sample, dtype=np.float32)
-    mask, allowed = parse_natural_instruction(user_instruction, config["feature_names"], config["immutable_idx"])
-    mask_t = torch.tensor(mask, dtype=torch.float32, device=device).unsqueeze(0)
+def generate_counterfactual(x_state, source_class, target_class, user_instruction):
+    try:
+        if not x_state:
+            return None, "No sample selected. Please get a random sample first.", None
 
-    x_t = torch.tensor(x_sample, dtype=torch.float32, device=device).unsqueeze(0)
-    target_vec = torch.tensor([target_class], dtype=torch.long, device=device)
-    target_onehot = F.one_hot(target_vec, num_classes).float()
+        x_sample = np.array(x_state["x_sample"], dtype=np.float32)
+        mask, allowed = parse_natural_instruction(user_instruction, feature_names, config.get("immutable_idx", []))
 
-    with torch.no_grad():
-        _, masked_residual = G(x_t, target_onehot, mask=mask_t)
-        x_cf = x_t + masked_residual
+        allowed = set(allowed)
+        per_request_immutable = [i for i, feat in enumerate(feature_names) if feat not in allowed]
+        cfg = dict(config)
+        cfg['immutable_idx'] = per_request_immutable
+        cfg['scaler'] = scaler
 
-    x_cf_np = x_cf.cpu().numpy().squeeze()
+        x_t = torch.tensor(x_sample, dtype=torch.float32, device=device).unsqueeze(0)
+        target_vec = torch.tensor([int(target_class)], dtype=torch.long, device=device)
+        target_onehot = F.one_hot(target_vec, num_classes).float()
 
-    # visualize
-    fig, ax = plt.subplots(figsize=(6, 4))
-    diffs = x_cf_np - x_sample
-    ax.barh(config["feature_names"], diffs)
-    ax.axvline(0, color="black", linewidth=0.8)
-    ax.set_title(f"Counterfactual Δ (Class {source_class} → {target_class})")
-    plt.tight_layout()
+        with torch.no_grad():
+            masked_residual, x_cf = build_counterfactuals(G, x_t, target_onehot, cfg)
 
-    return fig, f"Modified features: {', '.join(allowed) if allowed else 'None'}"
+        x_cf_np = x_cf.cpu().numpy().squeeze()
+
+        with torch.no_grad():
+            orig_probs = F.softmax(clf(torch.tensor(x_sample, dtype=torch.float32, device=device).unsqueeze(0)), dim=1).cpu().numpy().squeeze()
+            cf_probs = F.softmax(clf(torch.tensor(x_cf_np, dtype=torch.float32, device=device).unsqueeze(0)), dim=1).cpu().numpy().squeeze()
+
+        try:
+            orig_denorm = scaler.inverse_transform(x_sample.reshape(1, -1)).squeeze()
+            cf_denorm = scaler.inverse_transform(x_cf_np.reshape(1, -1)).squeeze()
+            abs_delta_denorm = np.abs(cf_denorm - orig_denorm)
+            if hasattr(scaler, 'data_max_') and hasattr(scaler, 'data_min_'):
+                feature_range = (scaler.data_max_ - scaler.data_min_).astype(float)
+            else:
+                feature_range = np.ones_like(abs_delta_denorm)
+            pct_of_range = (abs_delta_denorm / (feature_range + 1e-12)) * 100.0
+        except Exception:
+            orig_denorm = x_sample
+            cf_denorm = x_cf_np
+            abs_delta_denorm = np.abs(cf_denorm - orig_denorm)
+            pct_of_range = abs_delta_denorm * 100.0
+
+        df = pd.DataFrame({
+            "feature": feature_names,
+            "original": orig_denorm,
+            "counterfactual": cf_denorm,
+            "change": abs_delta_denorm,
+            "percentage of change": pct_of_range
+        })
+
+        eps = 1e-3
+        df['changed'] = (df['abs_delta'] > eps)
+
+        def row_to_html(row):
+            style = 'background-color: #2a9d8f; color: white;' if row['changed'] else ''
+            return f"<tr style=\"{style}\"><td>{row['feature']}</td><td>{row['orig']:.4f}</td><td>{row['cf']:.4f}</td><td>{row['abs_delta']:.4f}</td><td>{row['pct_of_range']:.2f}%</td></tr>"
+
+        header = "<table border=1 cellpadding=5><tr><th>feature</th><th>orig</th><th>cf</th><th>abs_delta</th><th>pct_of_range</th></tr>"
+        rows_html = "".join([row_to_html(r) for _, r in df.iterrows()])
+        table_html = header + rows_html + "</table>"
+
+        fig, ax = plt.subplots(figsize=(6, max(3, len(feature_names)*0.2)))
+        diffs = x_cf_np - x_sample
+        ax.barh(feature_names, diffs)
+        ax.axvline(0, color="black", linewidth=0.8)
+        ax.set_title(f"Counterfactual Δ (Class {int(source_class)} → {int(target_class)})")
+        plt.tight_layout()
+
+        summary_lines = [f"Modified features (allowed by instruction): {', '.join(sorted(list(allowed))) if allowed else 'None'}",
+                         f"Classifier orig probs: {np.round(orig_probs, 3).tolist()}",
+                         f"Classifier cf probs:   {np.round(cf_probs, 3).tolist()}"]
+        summary_text = "\n".join(summary_lines)
+
+        return fig, summary_text, table_html
+
+    except Exception as e:
+        import traceback
+        print("Error in generate_counterfactual():", traceback.format_exc())
+        return None, f"Error: {e}", None
 
 
-# ===== Gradio App =====
 with gr.Blocks() as demo:
-    gr.Markdown("## 🏠 CounterGAN Demo — King County Housing Data")
+    gr.Markdown("## 🏠 CounteRGAN Demo — King County Housing Data")
 
-    # STEP 1
     gr.Markdown("### 1️⃣ Dataset Overview")
-    plot_out = gr.Plot(label="Class Distribution")
     class_summary = gr.JSON(label="Class Counts")
     show_btn = gr.Button("Show Class Overview")
-    show_btn.click(fn=show_class_summary, outputs=[plot_out, class_summary])
+    show_btn.click(fn=show_class_summary, outputs=[class_summary])
 
-    # STEP 2
     gr.Markdown("### 2️⃣ Choose a source class to sample from")
     src_class = gr.Number(label="Source class (0–3)", value=0)
     x_state = gr.State()
-    src_pred_txt = gr.HTML(label="Selected House (features)")
+    src_table = gr.HTML(label="Selected House (denormalized features)")
+    src_pred_txt = gr.Textbox(label="Source sample classifier probs", interactive=False)
 
     get_sample_btn = gr.Button("Get Random Sample")
-    get_sample_btn.click(fn=show_sample, inputs=src_class, outputs=[x_state, src_pred_txt])
+    get_sample_btn.click(fn=show_sample, inputs=src_class, outputs=[x_state, src_table, src_pred_txt])
 
-    # STEP 3
     gr.Markdown("### 3️⃣ Generate Counterfactual via Natural Instruction")
     target_class = gr.Number(label="Target class (0–3)", value=1)
     instruction = gr.Textbox(
@@ -201,12 +247,13 @@ with gr.Blocks() as demo:
     )
     cf_plot = gr.Plot(label="Counterfactual Changes (Δ per feature)")
     cf_summary = gr.Textbox(label="Summary", interactive=False)
+    cf_table = gr.HTML(label="Counterfactual Table (denormalized)")
     gen_btn = gr.Button("Generate Counterfactual")
 
     gen_btn.click(
         fn=generate_counterfactual,
         inputs=[x_state, src_class, target_class, instruction],
-        outputs=[cf_plot, cf_summary],
+        outputs=[cf_plot, cf_summary, cf_table],
     )
 
 demo.launch(server_name="0.0.0.0", server_port=7860)

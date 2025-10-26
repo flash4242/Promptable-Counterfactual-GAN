@@ -11,9 +11,8 @@ import numpy
 from eval_utils import evaluate_pipeline
 
 # Load and preprocess
-X_train, X_test, y_train, y_test, scaler = load_and_preprocess(config['data_path'])
-config['scaler'] = scaler  # set the scaler in config for denormalization in evaluation
-
+X_train, X_test, y_train, y_test = load_and_preprocess(config['data_path'], config)
+scaler = config['scaler']
 device = config['cuda']
 
 # Load classifier

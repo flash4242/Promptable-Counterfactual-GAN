@@ -2,7 +2,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 
-def load_and_preprocess(data_path):
+def load_and_preprocess(data_path, config):
     seed = 42
     df = pd.read_csv(data_path)
     df = df.drop(columns=['id', 'date', 'zipcode'])
@@ -11,6 +11,7 @@ def load_and_preprocess(data_path):
     df['price_class'] = df['price_class'].astype(int)
 
     # Print bin ranges
+    config['bins'] = bins
     print("\nPrice class ranges:")
     for i in range(len(bins) - 1):
         print(f"Class {i}: ${bins[i]:,.0f} - ${bins[i+1]:,.0f}")
@@ -34,4 +35,5 @@ def load_and_preprocess(data_path):
     scaler = MinMaxScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
-    return X_train_scaled, X_test_scaled, y_train, y_test, scaler
+    config['scaler'] = scaler  # Store scaler in config for later use
+    return X_train_scaled, X_test_scaled, y_train, y_test

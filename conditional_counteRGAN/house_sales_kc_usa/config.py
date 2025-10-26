@@ -29,6 +29,7 @@ config = {
     'seed': 42,
     'out_dir': results_dir,
     'out_dir_mask': mask_dir,
+    'bins': None,  # class bins, to be set after loading data
     'gumbel_tau': 0.5,  # Gumbel-Softmax temperature
     'scaler': None,  # to be set after loading data
     'openai_api_key': None,
