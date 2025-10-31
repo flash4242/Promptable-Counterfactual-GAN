@@ -47,7 +47,6 @@ for p in generator.parameters():
     p.requires_grad = False
 
 print("Evaluating counterfactuals...")
-x, y = next(iter(test_loader)) 
-evaluate_pipeline(generator, classifier, x, y, full_dataset, config)
+evaluate_pipeline(generator, classifier, full_dataset, test_loader, config)
 
 

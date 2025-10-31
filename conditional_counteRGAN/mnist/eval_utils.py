@@ -7,6 +7,9 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 import seaborn as sns
 import math
 from typing import Tuple, Dict
+import pandas as pd
+from tqdm import tqdm
+
 
 
 def evaluate_classifier(classifier, dataloader, device, save_dir=None, prefix="classifier"):
@@ -49,7 +52,7 @@ def evaluate_counterfactuals(generator, classifier, x, y_true, y_target, device)
     num_classes = classifier(torch.zeros(1,1,28,28).to(device)).shape[1]
 
     with torch.no_grad():
-        residual = generator(x.to(device), y_target.to(device))
+        residual = generator(x.to(device), y_target.to(device), torch.ones_like(x, device=device))[1]
         # clamp to training range
         x_cf = torch.clamp(x.to(device) + residual, -1.0, 1.0)
         logits = classifier(x_cf)
@@ -71,6 +74,41 @@ def evaluate_counterfactuals(generator, classifier, x, y_true, y_target, device)
         "prediction_gain": pred_gain,
         "actionability": actionability,
     }, (x_vis, x_cf_vis)
+
+def evaluate_generator_per_target(generator, classifier, test_loader, config):
+    device = config.device
+    num_classes = config.num_classes
+    generator.eval()
+    classifier.eval()
+
+    results = {cls: {"class_flip_rate": [], "prediction_gain": [], "actionability": []}
+               for cls in range(num_classes)}
+
+    for x, y in tqdm(test_loader, desc="Evaluating per target class"):
+        x, y = x.to(device), y.to(device)
+
+        # Evaluate for each possible target class
+        for target_class in range(num_classes):
+            y_target = torch.full_like(y, target_class)
+            metrics, _ = evaluate_counterfactuals(generator, classifier, x, y, y_target, device)
+            for key in results[target_class]:
+                results[target_class][key].append(metrics[key])
+
+    # Average over all batches per target class
+    avg_results = {
+        cls: {metric: float(torch.tensor(vals).mean())
+              for metric, vals in metrics.items()}
+        for cls, metrics in results.items()
+    }
+
+    df = pd.DataFrame.from_dict(avg_results, orient="index")
+    os.makedirs(config.save_dir, exist_ok=True)
+    csv_path = os.path.join(config.save_dir, "countergan_metrics_per_class.csv")
+    df.to_csv(csv_path)
+
+    print(f"Saved per-class CounterGAN metrics to {csv_path}")
+    print(df)
+
 
 def visualize_counterfactual_grid(generator, classifier, dataset, device,
                                   class_map=None, save_path="cf_grid.png",
@@ -123,8 +161,8 @@ def visualize_counterfactual_grid(generator, classifier, dataset, device,
         text = f"Tgt={tgt}"
         if pred is not None:
             text += f"\nPred={pred}\nConf={conf:.2f}"
-        ax.text(0.5, -0.05, text, color="black", fontsize=7,
-                ha="center", va="top", transform=ax.transAxes)
+        # ax.text(0.5, -0.05, text, color="black", fontsize=7,
+        #         ha="center", va="top", transform=ax.transAxes)
 
     for r, x_src in enumerate(samples):
         x_src = x_src.to(device)
@@ -156,12 +194,12 @@ def visualize_counterfactual_grid(generator, classifier, dataset, device,
                 show_image(ax, img_disp, tgt=tgt_label,
                            pred=pred_label, conf=pred_conf, border_color=color)
 
-            if r == 0:
-                ax.set_title(f"Tgt={class_map[c]}", fontsize=10)
-            if c == 0:
-                ax.set_ylabel(f"Src={class_map[r]}", fontsize=10, rotation=90)
+            # if r == 0:
+            #     ax.set_title(f"Tgt={class_map[c]}", fontsize=10)
+            # if c == 0:
+            #     ax.set_ylabel(f"Src={class_map[r]}", fontsize=10, rotation=90)
 
-    plt.suptitle("Counterfactual Grid", fontsize=14)
+    #plt.suptitle("Counterfactual Grid", fontsize=14)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
@@ -272,6 +310,17 @@ def compute_masked_metrics(raw_residual: torch.Tensor, masked_residual: torch.Te
         logits_cf = classifier(x_cf)
         preds_cf = logits_cf.argmax(dim=1)
 
+        # calc pred_gain
+        logits_orig = classifier(x)
+        probs_orig = F.softmax(logits_orig, dim=1)
+        probs_cf = F.softmax(logits_cf, dim=1)
+
+        bs = x.size(0)
+        p_orig = probs_orig[torch.arange(bs), y_true]
+        p_cf = probs_cf[torch.arange(bs), y_target]
+        pred_gain = (p_cf - p_orig).mean().item()
+
+        # class flip rates
         flips = (preds_cf == y_target.to(device)).float()
         FR_mac = float(flips.mean().item())
         FR_max = float(flips.max().item())
@@ -294,6 +343,7 @@ def compute_masked_metrics(raw_residual: torch.Tensor, masked_residual: torch.Te
         "Class_flip_rate_mean": FR_mac,
         "Class_flip_rate_max": FR_max,
         "Residual_L1_norm_in_allowed_patches": Allowed_L1,
+        "Prediction_gain": pred_gain,
         "Actionability (overall L1 norm)": actionability,
         "mask_penalty_pre": mask_penalty_pre
     }
@@ -524,11 +574,12 @@ def save_user_modification_example(
 
 
 
-def evaluate_pipeline(generator, classifier, x, y, full_dataset, config):
+def evaluate_pipeline(generator, classifier, full_dataset, test_loader, config):
     """
     Orchestrator: runs the entire evaluation and visualization pipeline.
     """
     device = config.device
+    x, y = next(iter(test_loader)) 
     x, y = x.to(device), y.to(device)
     bs = x.size(0)
 
@@ -558,38 +609,44 @@ def evaluate_pipeline(generator, classifier, x, y, full_dataset, config):
     )
 
     # 5. Compute metrics
-    metrics = compute_masked_metrics(raw_residual, masked_residual, x, x_cf,
-                                     batch_mask, classifier, y, y_target, device)
+    # metrics = compute_masked_metrics(raw_residual, masked_residual, x, x_cf,
+    #                                  batch_mask, classifier, y, y_target, device)
+    metrics_without_mask = evaluate_counterfactuals(generator, classifier, x, y, y_target, device)[0]
+    evaluate_generator_per_target(generator, classifier, test_loader, config)
+
 
     # 6. Save visualizations
-    save_dir = os.path.join(config.save_dir, "eval_visuals")
-    os.makedirs(save_dir, exist_ok=True)
+    # save_dir = os.path.join(config.save_dir, "eval_visuals")
+    # os.makedirs(save_dir, exist_ok=True)
 
-    x_vis = ((x + 1.0) / 2.0).detach().cpu()
-    x_cf_vis = ((x_cf + 1.0) / 2.0).detach().cpu()
-    mask_vis = batch_mask.detach().cpu()
+    # x_vis = ((x + 1.0) / 2.0).detach().cpu()
+    # x_cf_vis = ((x_cf + 1.0) / 2.0).detach().cpu()
+    # mask_vis = batch_mask.detach().cpu()
 
-    make_and_save_heatmaps(
-        x_vis, x_cf_vis, mask_vis, metrics, classifier=classifier, device=device,
-        save_dir=save_dir, y_true=y, y_target=y_target, max_samples=min(16, bs)
-    )
+    # make_and_save_heatmaps(
+    #     x_vis, x_cf_vis, mask_vis, metrics, classifier=classifier, device=device,
+    #     save_dir=save_dir, y_true=y, y_target=y_target, max_samples=min(16, bs)
+    # )
 
     visualize_counterfactual_grid(
         generator, classifier, full_dataset, device,
         save_path=os.path.join(config.save_dir, "cf_grid.png")
     )
-    visualize_patch_grid(
-        x_vis[0], config.patch_size,
-        save_path=os.path.join(save_dir, "patch_grid.png")
-    )
+    
+    # visualize_patch_grid(
+    #     x_vis[0], config.patch_size,
+    #     save_path=os.path.join(save_dir, "patch_grid.png")
+    # )
 
-    # 7. Show simulated allowed-patch modification
-    save_user_modification_example(
-        x_vis, simulated_patches, generator, classifier,
-        y_true=y, y_target=y_target, device=device,
-        save_dir=save_dir, patch_size=config.patch_size
-    )
+    # # 7. Show simulated allowed-patch modification
+    # save_user_modification_example(
+    #     x_vis, simulated_patches, generator, classifier,
+    #     y_true=y, y_target=y_target, device=device,
+    #     save_dir=save_dir, patch_size=config.patch_size
+    # )
 
+    pd.DataFrame(metrics_without_mask, index=[0]).to_csv(os.path.join(config.save_dir, "countergan_metrics.csv"))
+    print(f"Countergan metrics: {metrics_without_mask}"
+            f"\nSaved to: {os.path.join(config.save_dir, 'countergan_metrics.csv')}")
 
-    print("Evaluation metrics:", metrics)
     print(f"Saved all visuals and patch example in: {save_dir}")
