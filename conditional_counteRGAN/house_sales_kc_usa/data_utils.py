@@ -5,7 +5,9 @@ from sklearn.preprocessing import MinMaxScaler
 def load_and_preprocess(data_path, config):
     seed = 42
     df = pd.read_csv(data_path)
+    
     df = df.drop(columns=['id', 'date', 'zipcode'])
+    df.loc[df['bedrooms'] > 8, 'bedrooms'] = 8 # clip the 33 bedroom  outlier
     # Label the price into 4 quartile-based bins and get bin intervals
     df['price_class'], bins = pd.qcut(df['price'], q=4, labels=[0, 1, 2, 3], retbins=True, duplicates='drop')
     df['price_class'] = df['price_class'].astype(int)

@@ -52,18 +52,32 @@ config = {
 }
 
 config['immutable_idx'] = [config['feature_names'].index(f) for f in config['immutable_features']]
-config['categorical_features'] = ["floors", "waterfront", "view", "condition", "grade", "bathrooms"]
+# Categorical (discrete) features including newly added bedrooms & bathrooms
+config['categorical_features'] = ["bedrooms", "bathrooms", "floors", "waterfront", "view", "condition", "grade"]
 config['categorical_idx'] = [config['feature_names'].index(f) for f in config['categorical_features']]
-
-# categorical_info maps feature_index -> dict with:
-#  - "n": number of discrete categories
-#  - "raw_values": list/array of raw integer values in the original data (needed to map one-hot -> normalized scalar)
-#    (raw_values should be the actual integer labels the column uses, e.g. view -> [0,1,2,3,4], condition -> [1..5], grade -> [1..13])
 config['categorical_info'] = {
-    5:  {"n": 2,  "raw_values": list(range(0, 2))},     # waterfront (0..1)
-    6:  {"n": 5,  "raw_values": list(range(0, 5))},     # view (0..4)
-    7:  {"n": 5,  "raw_values": list(range(1, 6))},     # condition (1..5)
-    8:  {"n": 13, "raw_values": list(range(1, 14))}     # grade (1..13)
+    # bedrooms (0..8+)
+    config['feature_names'].index("bedrooms"): {
+        "n": 9,
+        "raw_values": [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    },
+
+    # bathrooms (0.00–8.00)
+    config['feature_names'].index("bathrooms"): {
+        "n": 30,
+        "raw_values": sorted([
+            0.00, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00, 2.25, 2.50,
+            2.75, 3.00, 3.25, 3.50, 3.75, 4.00, 4.25, 4.50, 4.75, 5.00,
+            5.25, 5.50, 5.75, 6.00, 6.25, 6.50, 6.75, 7.50, 7.75, 8.00
+        ])
+    },
+
+    config['feature_names'].index("floors"):     {"n": 6,  "raw_values": [1.0, 1.5, 2.0, 2.5, 3.0, 3.5]},
+    config['feature_names'].index("waterfront"): {"n": 2,  "raw_values": [0, 1]},
+    config['feature_names'].index("view"):       {"n": 5,  "raw_values": [0, 1, 2, 3, 4]},
+    config['feature_names'].index("condition"):  {"n": 5,  "raw_values": [1, 2, 3, 4, 5]},
+    config['feature_names'].index("grade"):      {"n": 13, "raw_values": list(range(1, 14))}
 }
 
-config['continuous_idx'] = [i for i in range(config['input_dim']) if i not in config['categorical_info'].keys()]
+# Continuous features are the rest
+config['continuous_idx'] = [i for i in range(config['input_dim']) if i not in config['categorical_info']]
