@@ -1,311 +1,406 @@
 #!/usr/bin/env python3
 import os
-import json
 import re
+import json
 import random
 import torch
 import torchvision
 from torchvision import transforms, datasets
 import gradio as gr
-import numpy as np
-from typing import Tuple, List, Optional
+from typing import List, Optional
+import eval_utils as eval
 from config import Config as cfg
 
-# optional: LLM client
+import google.generativeai as genai
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.chains import ConversationChain
+from langchain.memory import ConversationBufferMemory
+from langchain.prompts import PromptTemplate
+
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Configure API key
 try:
-    import openai
-except Exception:
-    openai = None
+    GENAI_API_KEY = cfg.gemini_api_key
+    if not GENAI_API_KEY:
+        raise ValueError("Missing GENAI_API_KEY environment variable")
+    genai.configure(api_key=GENAI_API_KEY)
+except Exception as e:
+    logger.error(f"API Configuration Error: {e}")
+    raise
 
-# Import your eval utils (assumes eval_utils.py is in same folder / on PYTHONPATH)
-import eval_utils as eval
-
-# --- Configuration (adjust or read from config.py) ---
-PATCH_SIZE = cfg.patch_size                 # your working patch size (7 -> 4x4 grid)
-MIN_MODIFIABLE = cfg.min_modifiable_patches                # minimum patches if user doesn't choose enough
-MAX_MODIFIABLE = cfg.max_modifiable_patches             # optional cap (None -> half)
+# --- Config ---
+PATCH_SIZE = cfg.patch_size
 DEVICE = cfg.device
 
-# MNIST dataset (unpadded, same transforms your pipeline expects)
+# MNIST dataset loader
 transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))  # [-1,1]
-    ])
-
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,), (0.5,))
+])
 mnist_test = datasets.MNIST(cfg.data_dir, train=False, transform=transform, download=False)
 
-# Utility to pick a sample for a given source digit
-def pick_sample_by_digit(dataset, digit: int, seed: Optional[int]=None) -> Tuple[torch.Tensor, int]:
-    if seed is not None:
-        random.seed(seed)
-    indices = [i for i, t in enumerate(dataset.targets) if int(t) == int(digit)]
-    if not indices:
-        raise ValueError("No sample of that digit found.")
-    idx = random.choice(indices)
-    img, label = dataset[idx]
-    # img is normalized (-1,1) as your pipeline expects
-    return img.unsqueeze(0), int(label)        # shape (1,1,28,28), label
+# --- Globals for models ---
+GLOB_GENERATOR = None
+GLOB_CLASSIFIER = None
+SAVE_DIR = "./gradio_tmp"
+os.makedirs(SAVE_DIR, exist_ok=True)
 
-# Simple fallback parser for user free-text: extracts first digit as target and list of ints as patches
-def parse_user_input_fallback(text: str, total_patches: int) -> Tuple[int, List[int], str]:
-    text_lower = text.lower()
-    # Try explicit 'target' or 'to' phrase first
-    target_match = re.search(r"(?:target|to)\s*([0-9])", text_lower)
-    if target_match:
-        target = int(target_match.group(1))
-    else:
-        # fallback: first digit that appears
-        digits = re.findall(r"\b([0-9])\b", text)
-        target = int(digits[0]) if digits else None
-
-    # Extract patch numbers after keyword 'patch' (if present)
-    patch_section = re.split(r"patch(?:es)?", text_lower)
-    if len(patch_section) > 1:
-        patch_text = patch_section[1]
-    else:
-        patch_text = text_lower
-    patch_candidates = re.findall(r"\b([0-9]{1,2})\b", patch_text)
-    patches_int = [int(p) for p in patch_candidates if 0 <= int(p) < total_patches]
-
-    if target is None:
-        return None, [], "Couldn't detect a target digit. Please include a digit 0–9 as the desired target."
-    if len(patches_int) == 0:
-        return target, [], "No patch indices detected — choosing random allowed patches."
-    return target, sorted(list(set(patches_int))), ""
-
-
-# LLM parsing helper (optional). Returns (target:int, patches:list, message:str)
-def parse_user_input_llm(user_text: str, total_patches: int) -> Tuple[Optional[int], List[int], str]:
-    # If openai not available, fall back
-    if openai is None or os.environ.get("OPENAI_API_KEY", "") == "":
-        return parse_user_input_fallback(user_text, total_patches)
-
-    openai.api_key = os.environ["OPENAI_API_KEY"]
-    # prompt instructing the model to return JSON only
-    prompt = f"""
-You are a strict parser. Input is a short user instruction answering:
-  "Into which digit do you want to transform this?" and "Which patch numbers are allowed (list)?"
-
-Return a single JSON object on the reply ONLY with the keys:
-  "target": integer between 0 and 9,
-  "patches": array of integers (each between 0 and {total_patches-1}).
-
-If the user does not provide patches, return an empty list for "patches".
-If the target isn't present, set "target": null.
-
-Do not include any commentary. Example output:
-  {{ "target": 3, "patches": [1,5,6] }}
-Now parse this user message:
----
-{user_text}
-"""
-    try:
-        resp = openai.ChatCompletion.create(
-            model="gpt-4o-mini",   # choose a small/reasonable model; change as needed
-            messages=[{"role":"user","content":prompt}],
-            max_tokens=150,
-            temperature=0.0
-        )
-        text = resp["choices"][0]["message"]["content"].strip()
-        # Attempt to load JSON
-        obj = json.loads(text)
-        target = obj.get("target", None)
-        patches = obj.get("patches", [])
-        # validate
-        patches_valid = [int(p) for p in patches if isinstance(p, (int,float)) or (isinstance(p,str) and p.isdigit())]
-        patches_valid = [p for p in patches_valid if 0 <= p < total_patches]
-        return int(target) if target is not None else None, patches_valid, ""
-    except Exception as e:
-        return parse_user_input_fallback(user_text, total_patches)  # fallback with helpful message
-
-# Helper to build mask from explicit list of patches (returns batch_mask, single_mask)
-def make_mask_from_patch_list(x_batch: torch.Tensor, patch_size: int, allowed_patches: List[int], device) -> Tuple[torch.Tensor, torch.Tensor]:
-    # use your eval_utils function create behavior
-    batch_mask, single_mask = eval.build_patch_mask_for_batch(x_batch, patch_size=patch_size, device=device,
-                                                          shared_per_batch=True, modifiable_patches=allowed_patches,
-                                                          return_single_mask=True, randomize_per_sample=False)
-    return batch_mask, single_mask
-
-# Main Gradio function: shows MNIST sample and patch-grid first
-def get_sample_and_grid(source_req_text: str):
-    """
-    Interprets user natural language to pick a source digit.
-    Returns: original_image (PIL/np), patch_grid_path, source_digit
-    """
-    # parse source digit (first digit found) else pick random
-    m = re.search(r"\b([0-9])\b", source_req_text)
-    if m:
-        src = int(m.group(1))
-    else:
-        src = int(random.choice(range(10)))
-
-    x, label = pick_sample_by_digit(mnist_test, src)
-    save_dir = "./gradio_tmp"
-    os.makedirs(save_dir, exist_ok=True)
-
-    # visualize normalized → [0,1]
-    x_vis = ((x + 1.0) / 2.0).detach().cpu()
-    img_np = x_vis[0].squeeze().numpy()
-
-    # save both the original image and the patch grid overlay
-    orig_path = os.path.join(save_dir, "original_sample.png")
-    patch_grid_path = os.path.join(save_dir, "patch_grid.png")
-
-    torchvision.utils.save_image(x_vis, orig_path)  # save denormalized image
-    eval.visualize_patch_grid(x_vis[0], patch_size=PATCH_SIZE, save_path=patch_grid_path)
-
-    return orig_path, patch_grid_path, src
-
-
-# Callback to handle user's NL answer (target + patches). This uses LLM parse if key present else fallback
-def handle_user_answer(user_text: str, sample_source_img, sample_label, batch_tensor_path=None):
-    """
-    user_text: NL answer indicating target and patches
-    sample_source_img, sample_label: the original chosen sample returned from get_sample_and_grid
-    """
-    # sample_source_img expected as torch Tensor in previous pipeline? We'll instead re-pick sample here to get tensors.
-    # For simplicity we will pick a sample for sample_label:
-    x, label = pick_sample_by_digit(mnist_test, sample_label)
-    bs = 1
-    total_patches = (28 // PATCH_SIZE) * (28 // PATCH_SIZE)
-
-    # parse user_text with LLM (if available) else fallback
-    target, patches, msg = parse_user_input_llm(user_text, total_patches)
-    if target is None:
-        return None, f"Could not parse target: {msg}"
-
-    # if user provided zero patches, choose random between MIN and MAX
-    if len(patches) == 0:
-        max_p = MAX_MODIFIABLE if MAX_MODIFIABLE is not None else total_patches // 2
-        k = random.randint(MIN_MODIFIABLE, max(MIN_MODIFIABLE, max_p))
-        patches = sorted(random.sample(range(total_patches), k))
-
-    # Validate patches
-    patches = sorted([p for p in patches if 0 <= p < total_patches])
-    if len(patches) < MIN_MODIFIABLE:
-        return None, f"Too few allowed patches ({len(patches)}). Minimum required is {MIN_MODIFIABLE}."
-
-    # Build masks (shared per batch since we have 1 sample)
-    batch_mask, single_mask = make_mask_from_patch_list(x, PATCH_SIZE, patches, DEVICE)
-
-    # Call your generator/classifier via save_user_modification_example (which uses generator+classifier)
-    save_dir = "./gradio_tmp"
-    os.makedirs(save_dir, exist_ok=True)
-    # we must pass generator and classifier objects; assume user has loaded them into global variables below
+# --- Model loading ---
+def load_models(generator_path=None, classifier_path=None):
     global GLOB_GENERATOR, GLOB_CLASSIFIER
-    if GLOB_GENERATOR is None or GLOB_CLASSIFIER is None:
-        return None, "Generator / classifier not loaded on server. Start the app with models available."
+    from models.generator import ResidualGenerator
+    from models.classifier import CNNClassifier
+    GLOB_GENERATOR = ResidualGenerator(img_shape=(1,28,28)).to(DEVICE)
+    GLOB_CLASSIFIER = CNNClassifier().to(DEVICE)
+    if os.path.exists(generator_path):
+        GLOB_GENERATOR.load_state_dict(torch.load(generator_path, map_location=DEVICE))
+    if os.path.exists(classifier_path):
+        GLOB_CLASSIFIER.load_state_dict(torch.load(classifier_path, map_location=DEVICE))
+    GLOB_GENERATOR.eval()
+    GLOB_CLASSIFIER.eval()
+    print("Models loaded successfully.")
 
-    # call the helper in eval_utils (it will save the image to disk)
+
+class GeminiChatbot:
+    def __init__(self):
+        self.conversation_history = []
+        self.setup_model()
+        
+    def setup_model(self):
+        try:
+            # Template for our chat prompt
+            template = f"""
+            You are a friendly and knowledgeable assistant that guides users through generating counterfactual digits using an interactive GAN system based on the MNIST dataset.
+
+            ### Context for you:
+            This system shows images of handwritten digits (0–9) and can transform one digit into another using a Conditional Counterfactual GAN.  
+            Users can optionally control *which image regions (patches)* are allowed to change. A reference grid image, "patch_grid.png", shows how the patches are numbered.
+
+            ### Your behavior:
+            1. **Welcome the user warmly** and explain briefly what the system can do:
+            - That they can explore how digits can be transformed into others.
+            - That they can control which regions (patches) are allowed to change.
+            - Mention that a patch reference image ("patch_grid.png") is shown for guidance.
+
+            2. **Guide them step by step**:
+            - Ask: “Which digit would you like to inspect first?”  
+            - Wait for the user's response (`base digit`).
+            - Then confirm: “Okay, this is a digit X. What digit do you want it to transform into?”  
+            - Wait for the user's response (`target digit`).
+            - Then ask: “Which patches should be allowed to change? (If unsure, I’ll use all patches by default.)”
+
+            3. **Once the user answers all questions**, summarize their intent in **one JSON object only**, with the following format:
+
+            ```json
+            {{
+                "base": <integer between 0–9 or null>,
+                "target": <integer between 0–9 or null>,
+                "patches": [list of integers between 0 and {total_patches-1}]
+            }}
+            ```
+
+            Current conversation:
+                        {history}
+                        Human: {input}
+                        AI Assistant:
+            """
+            
+            prompt = PromptTemplate(
+                input_variables=["history", "input"], 
+                template=template
+            )
+            
+            # Set up memory for conversation history
+            memory = ConversationBufferMemory(return_messages=True)
+            
+            # Initialize the Gemini model
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-2.5-flash",
+                temperature=0.2,
+                top_p=0.95,
+                google_api_key=GENAI_API_KEY,
+                convert_system_message_to_human=True
+            )
+            
+            # Create conversation chain
+            self.conversation = ConversationChain(
+                llm=llm,
+                memory=memory,
+                prompt=prompt,
+                verbose=False
+            )
+            
+            logger.info("Gemini model successfully initialized.")
+            
+        except Exception as e:
+            logger.error(f"Model Setup Error: {e}")
+            raise
+    
+    def get_response(self, user_message, history):
+        try:
+            if not user_message.strip():
+                return "Please enter a message to continue the conversation."
+            
+            # Get response from the model
+            response = self.conversation.predict(input=user_message)
+            
+            # Update history
+            history.append((user_message, response))
+            
+            return response
+        except Exception as e:
+            logger.error(f"Response Generation Error: {e}")
+            return f"I'm having trouble processing your request. Please try again later. (Error: {type(e).__name__})"
+
+# Initialize the chatbot
+chatbot = GeminiChatbot()
+
+# Create Gradio interface
+def launch_interface():
+    with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
+        gr.Markdown("""
+        # 🤖 Gemini AI Chatbot
+        Have a conversation with Google's Gemini model powered by LangChain! Ask questions, seek advice, or just chat.
+        """)
+        
+        chatbot_ui = gr.Chatbot(
+            label="Conversation",
+            height=600,
+            bubble_full_width=False,
+            avatar_images=(
+                "https://api.dicebear.com/7.x/thumbs/svg?seed=user",
+                "https://api.dicebear.com/7.x/thumbs/svg?seed=assistant"
+            )
+        )
+        
+        with gr.Row():
+            msg = gr.Textbox(
+                show_label=False,
+                placeholder="Type your message here...",
+                container=False,
+                scale=9
+            )
+            submit = gr.Button("Send", variant="primary", scale=1)
+        
+        clear = gr.Button("Clear Conversation")
+        
+        # Event handlers
+        history = []
+        
+        def respond(message, chat_history):
+            bot_response = chatbot.get_response(message, history)
+            chat_history.append((message, bot_response))
+            return "", chat_history
+        
+        def clear_conversation():
+            chatbot.conversation_history = []
+            return [], []
+        
+        # Set up event listeners
+        submit.click(respond, [msg, chatbot_ui], [msg, chatbot_ui])
+        msg.submit(respond, [msg, chatbot_ui], [msg, chatbot_ui])
+        clear.click(clear_conversation, None, [chatbot_ui, msg])
+        
+        gr.Markdown("""
+        ### 💡 Tips
+        - Be specific in your questions for better answers
+        - You can ask follow-up questions to dive deeper into a topic
+        - Type 'help' if you need assistance with using this chatbot
+        """)
+        
+    return demo
+
+if __name__ == "__main__":
+    try:
+        demo = launch_interface()
+        demo.launch(share=True)
+    except Exception as e:
+        logger.critical(f"Application Error: {e}")
+
+# # --- Helper functions ---
+# def pick_sample_by_digit(dataset, digit: int) -> torch.Tensor:
+#     indices = [i for i, t in enumerate(dataset.targets) if int(t) == int(digit)]
+#     if not indices:
+#         raise ValueError(f"No sample of digit {digit}")
+#     idx = random.choice(indices)
+#     img, label = dataset[idx]
+#     return img.unsqueeze(0), int(label)
+
+def make_mask_from_patch_list(x_batch, patch_size, allowed_patches):
+    _, single_mask = eval.build_patch_mask_for_batch(
+        x_batch, patch_size=patch_size, device=DEVICE,
+        shared_per_batch=True, modifiable_patches=allowed_patches,
+        return_single_mask=True, randomize_per_sample=False
+    )
+    return single_mask
+
+def run_transformation(x, label, target_digit:int, patches:List[int]):
+    if GLOB_GENERATOR is None or GLOB_CLASSIFIER is None:
+        return None, None, "Generator or classifier not loaded."
+    single_mask = make_mask_from_patch_list(x, PATCH_SIZE, patches)
+    x_vis = ((x + 1.0)/2.0).detach().cpu()
     eval.save_user_modification_example(
-        x_vis=((x + 1.0) / 2.0).detach().cpu(),
+        x_vis=x_vis,
         simulated_patches=patches,
         generator=GLOB_GENERATOR,
         classifier=GLOB_CLASSIFIER,
         y_true=torch.tensor([label], device=DEVICE),
-        y_target=torch.tensor([target], device=DEVICE),
+        y_target=torch.tensor([target_digit], device=DEVICE),
         device=DEVICE,
-        save_dir=save_dir,
+        save_dir=SAVE_DIR,
         patch_size=PATCH_SIZE
     )
+    out_image = os.path.join(SAVE_DIR, "simulated_user_modification.png")
+    return out_image, "Transformation complete."
 
-    # # also produce the sample heatmap (the more detailed one) for convenience
-    # # build a batch mask and generate CF to build the sample heatmap images using make_and_save_heatmaps helpers:
-    # with torch.no_grad():
-    #     raw_res, masked_res = GLOB_GENERATOR(x.to(DEVICE), torch.tensor([target], device=DEVICE), batch_mask.to(DEVICE))
-    #     x_cf = torch.clamp(x.to(DEVICE) + masked_res, -1.0, 1.0)
-    # x_vis = ((x + 1.0) / 2.0).detach().cpu()
-    # xcf_vis = ((x_cf + 1.0) / 2.0).detach().cpu()
-    # mask_vis = batch_mask.detach().cpu()
-    # metrics = eval.compute_masked_metrics(raw_res, masked_res, x.to(DEVICE), x_cf, batch_mask.to(DEVICE),
-    #                                   GLOB_CLASSIFIER, torch.tensor([label], device=DEVICE), torch.tensor([target], device=DEVICE), DEVICE)
-    # # save sample heatmap
-    # eval.make_and_save_heatmaps(x_vis, xcf_vis, mask_vis, metrics, save_dir=save_dir,
-    #                          y_true=torch.tensor([label]), y_target=torch.tensor([target]),
-    #                          classifier=GLOB_CLASSIFIER, device=DEVICE, max_samples=1)
+# # --- Deterministic parser ---
+# def deterministic_parse(user_text:str, total_patches:int):
+#     out = {"base": None, "target": None, "patches": []}
+#     digits = re.findall(r"\b([0-9])\b", user_text)
+#     if len(digits) >= 1:
+#         out["base"] = int(digits[0])
+#     if len(digits) >= 2:
+#         out["target"] = int(digits[1])
+#     # parse patches
+#     m = re.search(r"patch(?:es)?\s*[:=]?\s*([0-9,\-\s]+)", user_text, flags=re.IGNORECASE)
+#     if m:
+#         chunk = m.group(1)
+#         parts = [p.strip() for p in re.split(r"[,\s]+", chunk) if p.strip()]
+#         patches = []
+#         for p in parts:
+#             if re.match(r"^\d+-\d+$", p):
+#                 a,b = [int(x) for x in p.split("-")]
+#                 patches.extend(list(range(a, b+1)))
+#             elif p.isdigit():
+#                 patches.append(int(p))
+#         out["patches"] = sorted(set([p for p in patches if 0 <= p < total_patches]))
+#     return out
 
-    # Return file path(s) for Gradio to show
-    return {
-        "simulated_example": os.path.join(save_dir, "simulated_user_modification.png"),
-        "patch_grid": os.path.join(save_dir, "patch_grid.png")
-    }, f"Done. transformed {label} → {target} using patches {patches} (parsed)."
+# # --- LLM parser fallback ---
+# def llm_parse_intent(user_text:str, total_patches:int):
+#     prompt = f"""
+# You are a friendly assistant helping a user transform MNIST digits using CounterGAN.
+# The user said: "{user_text}"
+# Infer:
+# - base digit (0-9 or random)
+# - target digit (0-9)
+# - allowed patches (list, default all if missing)
+# Return exactly one JSON object:
+# {{"base": <0-9>, "target": <0-9>, "patches": [0,1,...]}}
+# """
+#     if GEMINI_MODEL is None:
+#         raise RuntimeError("Gemini not configured for LLM parsing.")
+#     raw = GEMINI_MODEL.generate(prompt=prompt, temperature=0.0, max_output_tokens=256)
+#     # extract JSON
+#     import re, json
+#     txt = str(raw)
+#     m = re.search(r"(\{.*\})", txt, flags=re.DOTALL)
+#     if not m:
+#         raise ValueError(f"LLM output invalid: {txt}")
+#     parsed = json.loads(m.group(1))
+#     if "patches" not in parsed or not parsed["patches"]:
+#         parsed["patches"] = list(range(total_patches))
+#     return parsed
 
-# --- Globals for models (load your trained models here) ---
-GLOB_GENERATOR = None
-GLOB_CLASSIFIER = None
+# def assistant(user_text: str, state: dict):
+#     total_patches = (28 // PATCH_SIZE) ** 2
 
-def load_models(generator_path: str, classifier_path: str, device=DEVICE):
-    global GLOB_GENERATOR, GLOB_CLASSIFIER
-    # You must import your actual generator/classifier classes
-    from models.generator import ResidualGenerator
-    from models.classifier import CNNClassifier
-    # instantiate with same shapes
-    GLOB_GENERATOR = ResidualGenerator(img_shape=(1,28,28)).to(device)
-    GLOB_CLASSIFIER = CNNClassifier().to(device)
-    if os.path.exists(generator_path):
-        GLOB_GENERATOR.load_state_dict(torch.load(generator_path, map_location=device))
-    if os.path.exists(classifier_path):
-        GLOB_CLASSIFIER.load_state_dict(torch.load(classifier_path, map_location=device))
-    GLOB_GENERATOR.eval()
-    GLOB_CLASSIFIER.eval()
-    print("Loaded models.")
+#     # Step 0: welcome
+#     if state.get("step", 0) == 0:
+#         state.update({"step": 1})
+#         return (
+#             "Welcome! You can explore MNIST digits and transform them into other digits. "
+#             "You can also control which regions (patches) are allowed to change. "
+#             "A patch reference image ('patch_grid.png') will be shown for guidance.\n\n"
+#             "Which digit would you like to inspect first?",
+#             state, None, None, None, None
+#         )
 
-# --- Build minimal Gradio interface ---
-def build_app(generator_path: str, classifier_path: str):
-    load_models(generator_path, classifier_path, DEVICE)
+#     # Step 1: get base digit
+#     if state.get("step") == 1:
+#         m = re.search(r"\b([0-9])\b", user_text)
+#         state["base"] = int(m.group(1)) if m else None
+#         state["step"] = 2
+#         return (
+#             f"Okay, this is digit {state['base']}. What digit do you want it to transform into?",
+#             state, None, None, None, None
+#         )
 
-    with gr.Blocks() as demo:
-        gr.Markdown("## CounterGAN LLM-enabled demo (minimal)\n"
-                    "Enter something like: 'Show me a 7' then press `Get sample`. "
-                    "Then tell the system: 'Make it a 3 and allow patches 1,5,6' in the second box.")
+#     # Step 2: get target digit
+#     if state.get("step") == 2:
+#         m = re.search(r"\b([0-9])\b", user_text)
+#         state["target"] = int(m.group(1)) if m else None
+#         state["step"] = 3
+#         return (
+#             f"Which patches should be allowed to change? (If unsure, I will use all patches by default. Patches range 0–{total_patches-1})",
+#             state, None, None, None, None
+#         )
 
-        with gr.Row():
-            with gr.Column():
-                src_text = gr.Textbox(label="Pick source digit (natural language, e.g. 'show me a 7')",
-                                      value="show me a 7")
-                btn_sample = gr.Button("Get sample")
-            with gr.Row():
-                sample_img = gr.Image(label="Original MNIST digit", type="filepath", width=224, height=224)
-                patch_grid_display = gr.Image(label="Patch grid (patch indices)", type="filepath", width=224, height=224)
-                chosen_label_display = gr.Textbox(label="Selected source label", interactive=False)
+#     # Step 3: get patches + run transformation
+#     if state.get("step") == 3:
+#         # parse patches
+#         patches = []
+#         m = re.findall(r"\d+", user_text)
+#         if m:
+#             patches = [int(p) for p in m if 0 <= int(p) < total_patches]
+#         state["patches"] = patches if patches else list(range(total_patches))
 
-            with gr.Column():
-                user_answer = gr.Textbox(label="Your target & allowed patches (NL)", value="Target 3 patches 1,5,6")
-                btn_apply = gr.Button("Apply transformation (LLM parse)")
-                output_text = gr.Textbox(label="Status / messages", interactive=False)
-                out_sim_example = gr.Image(label="Simulated modification (allowed patches)")
+#         # Pick MNIST sample
+#         base = state["base"] if state["base"] is not None else random.choice(range(10))
+#         target = state["target"] if state["target"] is not None else base
+#         x, label = pick_sample_by_digit(mnist_test, base)
+#         x_vis = ((x + 1.0) / 2.0).detach().cpu()
 
-        # Handlers
-        def on_get_sample(txt):
-            orig_path, patch_grid_path, src = get_sample_and_grid(txt)
-            chosen_label = str(src)
-            return orig_path, patch_grid_path, chosen_label
+#         # Save original + patch grid
+#         orig_path = os.path.join(SAVE_DIR, "original_sample.png")
+#         patch_grid_path = os.path.join(SAVE_DIR, "patch_grid.png")
+#         torchvision.utils.save_image(x_vis, orig_path)
+#         eval.visualize_patch_grid(x_vis[0], PATCH_SIZE, patch_grid_path)
+
+#         # Run transformation
+#         out_img, msg = run_transformation(x, label, target, state["patches"])
+
+#         # Prepare reply
+#         reply = f"Transformed digit {base} → {target}. See images and heatmap above."
+
+#         # Reset state for next session
+#         state.update({"step": 0, "base": None, "target": None, "patches": []})
+
+#         return reply, state, orig_path, patch_grid_path, out_img
 
 
-        btn_sample.click(fn=on_get_sample, inputs=[src_text], outputs=[sample_img, patch_grid_display, chosen_label_display])
 
-        def on_apply(ans_text, sample_label_str):
-            try:
-                sample_label = int(sample_label_str)
-            except:
-                return None, None, "No source sample chosen."
 
-            results, msg = handle_user_answer(ans_text, None, sample_label)
-            if results is None:
-                return None, None, msg
-            # return images
-            return results["simulated_example"], msg
+# # --- Gradio UI ---
+# with gr.Blocks(title="MNIST CC-GAN + Gemini chatbot assistant") as demo:
+#     gr.Markdown("## MNIST CC-GAN demo with a friendly assistant")
+#     with gr.Row():
+#         user_input = gr.Textbox(lines=2, placeholder="Type something like 'transform 3 to 7, patches 0-3'", label="Your request")
+#         assistant_reply_box = gr.Textbox(label="Chatbot assistant", interactive=False)
+#         state = gr.State(value={"step": 0, "base": None, "target": None, "patches": []})
+#     with gr.Row():
+#         send_btn = gr.Button("Send")
+#         orig_img = gr.Image(label="Original digit", type="filepath", height=280, width=280)
+#         grid_img = gr.Image(label="Patch grid", type="filepath", height=280, width=280)
+#     with gr.Row():
+#         result_img = gr.Image(label="Transformed digit", type="filepath")
+#     send_btn.click(
+#         assistant,
+#         inputs=[user_input, state],
+#         outputs=[assistant_reply_box, state, orig_img, grid_img, result_img]
+#     )
 
-        btn_apply.click(fn=on_apply, inputs=[user_answer, chosen_label_display],
-                        outputs=[out_sim_example, output_text])
+# # TODO: smooth gradio interface from github
 
-    return demo
 
-# === ENTRYPOINT ===
-if __name__ == "__main__":
-    # paths to your trained weights (adjust)
-    gen_path = cfg.generator_path
-    cls_path = cfg.classifier_path
-
-    demo = build_app(gen_path, cls_path)
-    demo.launch(server_name="0.0.0.0", share=False)
+# if __name__ == "__main__":
+#     try:
+#         load_models(generator_path=cfg.generator_path, classifier_path=cfg.classifier_path)
+#     except Exception as e:
+#         print(f"Failed to load models at startup: {e}")
+#     demo.launch(server_name="0.0.0.0")

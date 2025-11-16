@@ -40,7 +40,7 @@ config = {
     'generator_path': 'generator_model.pt',
     'clf_loss_plot': os.path.join(clf_dir, 'loss_plot.png'),
 
-    'immutable_features': ["lat", "long", "yr_built"], # "yr_renovated"
+    'immutable_features': ["lat", "long", "yr_built", "yr_renovated"], # "yr_renovated"
     'feature_names': [
         "bedrooms", "bathrooms", "sqft_living", "sqft_lot",
         "floors", "waterfront", "view", "condition", "grade",
@@ -52,7 +52,6 @@ config = {
 }
 
 config['immutable_idx'] = [config['feature_names'].index(f) for f in config['immutable_features']]
-# Categorical (discrete) features including newly added bedrooms & bathrooms
 config['categorical_features'] = ["bedrooms", "bathrooms", "floors", "waterfront", "view", "condition", "grade"]
 config['categorical_idx'] = [config['feature_names'].index(f) for f in config['categorical_features']]
 config['categorical_info'] = {

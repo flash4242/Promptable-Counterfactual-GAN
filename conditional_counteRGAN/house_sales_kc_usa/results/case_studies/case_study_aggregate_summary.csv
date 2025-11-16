@@ -1,2 +1,2 @@
 n_samples_used,class_flip_rate,mean_prediction_gain,median_prediction_gain,mean_L1_sum_norm,mean_L2_norm,mean_num_changed,mean_frac_changed,mean_sparsity,topk_features_global,topk_features_global_mean_pct
-20,0.95,0.7471042022109031,0.8011139333248138,0.8545053049921989,0.4182786554098129,8.9,0.5235294117647058,0.4764705882352941,"sqft_lot,grade,bedrooms,sqft_living,floors","20.662,17.500,9.375,6.577,6.000"
+20,1.0,0.7802708983421326,0.8437992036342621,0.8276298552751541,0.39222642183303835,8.45,0.49705882352941166,0.5029411764705882,"sqft_lot,grade,bedrooms,sqft_living,condition","17.596,15.000,11.250,8.835,7.500"

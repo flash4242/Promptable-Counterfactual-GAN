@@ -26,3 +26,4 @@ class Config:
     classifier_path = f"{save_dir}/best_classifier.pt"
     generator_path = f"{save_dir}/generator.pt"
     data_dir = "/mnt/data"
+    gemini_api_key = "AIzaSyDE_vB1k_BDxeRwRP1ye_jKQnEHv6SV3Rc"

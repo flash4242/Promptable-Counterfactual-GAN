@@ -194,12 +194,7 @@ def visualize_counterfactual_grid(generator, classifier, dataset, device,
                 show_image(ax, img_disp, tgt=tgt_label,
                            pred=pred_label, conf=pred_conf, border_color=color)
 
-            # if r == 0:
-            #     ax.set_title(f"Tgt={class_map[c]}", fontsize=10)
-            # if c == 0:
-            #     ax.set_ylabel(f"Src={class_map[r]}", fontsize=10, rotation=90)
-
-    #plt.suptitle("Counterfactual Grid", fontsize=14)
+    # #plt.suptitle("Counterfactual Grid", fontsize=14)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
