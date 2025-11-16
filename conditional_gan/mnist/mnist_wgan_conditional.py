@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-
-
-# Commented out IPython magic to ensure Python compatibility.
 import torch
 from torch import nn, optim, autograd
 import torchvision
