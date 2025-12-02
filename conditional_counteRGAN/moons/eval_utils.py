@@ -189,42 +189,80 @@ def save_metrics(df, save_path):
     df.to_csv(save_path, index=False)
     print(f"Saved metrics to {save_path}")
 
-def evaluate_pipeline(generator, classifier, X_test, y_test, config):
-    base_out = config['out_dir']
+def plot_decision_boundaries_only(classifier, X, y, config, save_name="decision_boundaries_original.png"):
+    device = config['cuda']
+    num_classes = len(np.unique(y))
 
-    # Define masks (as numpy 1D arrays) - input_dim assumed 2
-    masks = {
-        "both": np.array([1, 1], dtype=np.float32),
-        "none": np.array([0, 0], dtype=np.float32),
-        "x_only": np.array([1, 0], dtype=np.float32),
-        "y_only": np.array([0, 1], dtype=np.float32)
-    }
+    # Create grid
+    x_min, x_max = X[:, 0].min() - 0.1, X[:, 0].max() + 0.1
+    y_min, y_max = X[:, 1].min() - 0.1, X[:, 1].max() + 0.1
+    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 200),
+                         np.linspace(y_min, y_max, 200))
+    grid = np.c_[xx.ravel(), yy.ravel()]
+    grid_t = torch.tensor(grid, dtype=torch.float32).to(device)
+
+    with torch.no_grad():
+        Z = classifier(grid_t).argmax(1).cpu().numpy()
+    Z = Z.reshape(xx.shape)
+
+    # Prepare folder
+    out_dir = config['out_dir']
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Plot
+    plt.figure(figsize=(8, 6))
+    plt.contourf(xx, yy, Z, alpha=0.3, cmap="coolwarm")
+    plt.scatter(X[:, 0], X[:, 1], c=y, cmap="coolwarm", edgecolor="k", s=40)
+
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.title("Classifier Decision Boundaries + Original Data Points")
+
+    save_path = os.path.join(out_dir, save_name)
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Saved plot: {save_path}")
+
+
+def evaluate_pipeline(generator, classifier, X_test, y_test, config):
+    # base_out = config['out_dir']
+
+    # # Define masks (as numpy 1D arrays) - input_dim assumed 2
+    # masks = {
+    #     "both": np.array([1, 1], dtype=np.float32),
+    #     "none": np.array([0, 0], dtype=np.float32),
+    #     "x_only": np.array([1, 0], dtype=np.float32),
+    #     "y_only": np.array([0, 1], dtype=np.float32)
+    # }
 
     # first global classifier metrics
     evaluate_classifier(classifier, X_test, y_test, config)
 
     all_metrics = {}
-    for name, mask in masks.items():
-        print(f"Evaluating mask: {name}")
-        out_dir = os.path.join(base_out, f"mask_{name}")
-        cfg = dict(config)  # shallow copy
-        cfg['out_dir'] = out_dir
-        os.makedirs(out_dir, exist_ok=True)
+    # for name, mask in masks.items():
+    #     print(f"Evaluating mask: {name}")
+    #     out_dir = os.path.join(base_out, f"mask_{name}")
+    #     cfg = dict(config)  # shallow copy
+    #     cfg['out_dir'] = out_dir
+    #     os.makedirs(out_dir, exist_ok=True)
 
-        metrics_df = compute_metrics_per_target(generator, classifier, X_test, y_test, cfg, mask=mask)
-        save_metrics(metrics_df, os.path.join(out_dir, "metrics.csv"))
+    #     metrics_df = compute_metrics_per_target(generator, classifier, X_test, y_test, cfg, mask=mask)
+    #     save_metrics(metrics_df, os.path.join(out_dir, "metrics.csv"))
 
-        plot_decision_boundaries_and_cfs(generator, classifier, X_test, y_test, cfg,
-                                         mask=mask, n_cf_samples=30,
-                                         save_prefix=f"decision_boundaries_cfs_{name}")
-        all_metrics[name] = metrics_df
+    #     plot_decision_boundaries_and_cfs(generator, classifier, X_test, y_test, cfg,
+    #                                      mask=mask, n_cf_samples=30,
+    #                                      save_prefix=f"decision_boundaries_cfs_{name}")
+    #     all_metrics[name] = metrics_df
 
-    # Optionally concatenate and save a summary table with masks as columns
-    summary_rows = []
-    for name, df in all_metrics.items():
-        df2 = df.copy()
-        df2['mask'] = name
-        summary_rows.append(df2)
-    summary_df = pd.concat(summary_rows, ignore_index=True)
-    save_metrics(summary_df, os.path.join(base_out, "metrics_all_masks.csv"))
-    return summary_df
+    # # Optionally concatenate and save a summary table with masks as columns
+    # summary_rows = []
+    # for name, df in all_metrics.items():
+    #     df2 = df.copy()
+    #     df2['mask'] = name
+    #     summary_rows.append(df2)
+    # summary_df = pd.concat(summary_rows, ignore_index=True)
+    # save_metrics(summary_df, os.path.join(base_out, "metrics_all_masks.csv"))
+    plot_decision_boundaries_only(classifier, X_test, y_test, config,
+                              save_name="decision_boundaries_no_cfs.png")
+
+    return None
